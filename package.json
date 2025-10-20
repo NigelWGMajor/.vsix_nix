@@ -3,7 +3,7 @@
   "displayName": "Nix Upstream Check",
   "description": "Find all upstream references to a C# function and display the call tree.",
   "version": "0.1.0",
-  "publisher": "your-publisher-id",
+  "publisher": "NigelWGMajor",
   "engines": {
     "vscode": ">=1.70.0"
   },
@@ -29,7 +29,7 @@
     "commands": [
       {
         "command": "nixUpstreamCheck.start",
-        "title": "Nix Upstream Check"
+        "title": "Check Method Callers"
       },
       {
         "command": "nixUpstreamCheck.exhaustiveSearch",
@@ -54,6 +54,11 @@
         "command": "nixUpstreamCheck.exportMarkdown",
         "title": "Export as Markdown",
         "icon": "$(markdown)"
+      },
+      {
+        "command": "nixUpstreamCheck.pruneUnchecked",
+        "title": "Prune Unchecked Items",
+        "icon": "$(filter)"
       }
     ],
     "menus": {
@@ -88,6 +93,11 @@
           "group": "navigation"
         },
         {
+          "command": "nixUpstreamCheck.pruneUnchecked",
+          "when": "view == nixUpstreamCheckTree",
+          "group": "navigation"
+        },
+        {
           "command": "nixUpstreamCheck.clearTree",
           "when": "view == nixUpstreamCheckTree",
           "group": "navigation"
@@ -99,7 +109,7 @@
         {
           "id": "nixUpstreamCheckSidebar",
           "title": "Nix Upstream",
-          "icon": "media/nix.svg"
+          "icon": "media/tree.svg"
         }
       ]
     },

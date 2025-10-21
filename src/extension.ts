@@ -945,6 +945,17 @@ export function deactivate() {}
             this._onDidChangeTreeData.fire();
         }
 
+        // Helper function to determine type indicator based on file path and context
+        private getTypeIndicator(filePath: string, isInterface: boolean = false): string {
+            const fileName = filePath.toLowerCase();
+
+            if (isInterface) return '𝐈';  // Bold I
+            if (fileName.includes('controller')) return '𝐂';  // Bold C
+            if (fileName.includes('service')) return '𝐒';  // Bold S
+            if (fileName.includes('orchestrator')) return '𝐎';  // Bold O
+            return '𝐌'; // Bold M - Default to Method
+        }
+
         // Depth-first traversal: returns true if this node or any descendants are checked
         // MUST traverse entire tree - cannot return early or siblings won't be processed!
         private normalizeCheckStates(tree: any, depth: number = 0, debugOutput?: vscode.OutputChannel): boolean {
@@ -1446,8 +1457,12 @@ export function deactivate() {}
                 tooltip = `Reference at:\n${tree.file}:${tree.line + 1}:${tree.character + 1}`;
                 collapsibleState = vscode.TreeItemCollapsibleState.None;
             } else {
-                // Method node
-                label = tree.name + (tree.httpAttribute ? ` [${tree.httpAttribute}]` : '');
+                // Method node - determine type indicator
+                const isInterface = tree.file && tree.file.toLowerCase().includes('interface');
+                const typeIndicator = this.getTypeIndicator(tree.file || '', isInterface);
+
+                // Add type indicator before the method name (no brackets, using bold unicode)
+                label = `${typeIndicator} ${tree.name}${tree.httpAttribute ? ` [${tree.httpAttribute}]` : ''}`;
 
                 // For root nodes, add the stats
                 if (isRoot) {

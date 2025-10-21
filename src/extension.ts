@@ -14,16 +14,20 @@ export function activate(context: vscode.ExtensionContext) {
     // - Complex generic types: Task<List<Type.NestedType>>
     // Pattern 1: Has at least one keyword (class methods)
     const methodRegexWithKeywords = /(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial)\s+(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial|\s)*([\w<>\[\],\s.]+)\s+(\w+)\s*\(/;
-    // Pattern 2: No keywords but has return type pattern (interface methods)
-    // Return type must contain common patterns or be a known type (Task, void, int, string, bool, IEnumerable, etc.)
-    // Updated to handle Task, Task<T>, ValueTask, ValueTask<T>, and other common types with or without generics
-    const methodRegexNoKeywords = /^\s*(Task|ValueTask|void|int|long|string|bool|double|float|decimal|byte|char|short|object|IEnumerable|ICollection|IList|IAsyncEnumerable|List|Dictionary|[\w.]+)(<[^>]+>)?\s+(\w+)\s*\(/;
 
-    // Helper function to check if a line is a method definition
-    const isMethodDefinition = (line: string): boolean => {
+    // Pattern 2a: PERMISSIVE - for cursor detection (matches any return type)
+    // Simplified to match any valid type identifier ([\w.]+) with optional generics
+    const methodRegexNoKeywordsPermissive = /^\s*([\w.]+)(<[\s\S]*?>)?\s+(\w+)\s*\(/;
+
+    // Pattern 2b: RESTRICTIVE - for finding enclosing methods (known return types only)
+    // Used during reference search to avoid false positives like variable declarations
+    const methodRegexNoKeywordsRestrictive = /^\s*(Task|ValueTask|void|int|long|string|bool|double|float|decimal|byte|char|short|object|IEnumerable|ICollection|IList|IAsyncEnumerable|List|Dictionary|Action|Func)(<[\s\S]*?>)?\s+(\w+)\s*\(/;
+
+    // Helper function: check if line looks like code that's NOT a method definition
+    const isNonMethodCode = (line: string): boolean => {
         const trimmed = line.trim();
 
-        // Must NOT be a catch/using/if/for/while/switch/throw statement
+        // Check for control flow statements and other non-method code
         if (trimmed.startsWith('catch ') ||
             trimmed.startsWith('using ') ||
             trimmed.startsWith('if ') ||
@@ -32,28 +36,64 @@ export function activate(context: vscode.ExtensionContext) {
             trimmed.startsWith('while ') ||
             trimmed.startsWith('switch ') ||
             trimmed.startsWith('throw ') ||
-            trimmed.startsWith('return ')) {
-            return false;
+            trimmed.startsWith('return ') ||
+            trimmed.startsWith('var ') ||
+            trimmed.startsWith('await ') ||
+            trimmed.startsWith('new ') ||
+            trimmed.includes('=>')) {    // Lambda expressions
+            return true;
         }
 
-        // Must match at least one of the patterns
-        return methodRegexWithKeywords.test(line) || methodRegexNoKeywords.test(line);
+        // Check for variable assignment (but NOT default parameter values)
+        // Variable assignments have '=' but NOT inside parentheses (method parameters)
+        if (trimmed.includes(' = ')) {
+            // If there's an opening paren before the '=', it's likely a default parameter
+            const equalIndex = trimmed.indexOf(' = ');
+            const parenIndex = trimmed.indexOf('(');
+            // If no opening paren, or '=' comes before '(', it's a variable assignment
+            if (parenIndex === -1 || equalIndex < parenIndex) {
+                return true;
+            }
+        }
+
+        return false;
     };
 
-    // Combined method regex for extracting method name
-    const getMethodMatch = (line: string): RegExpMatchArray | null => {
+    // Check if line is a method definition at CURSOR (permissive - any return type)
+    const isMethodDefinitionAtCursor = (line: string): boolean => {
+        if (isNonMethodCode(line)) return false;
+        return methodRegexWithKeywords.test(line) || methodRegexNoKeywordsPermissive.test(line);
+    };
+
+    // Check if line is an ENCLOSING method during search (restrictive - known return types)
+    const isEnclosingMethodDefinition = (line: string): boolean => {
+        if (isNonMethodCode(line)) return false;
+        return methodRegexWithKeywords.test(line) || methodRegexNoKeywordsRestrictive.test(line);
+    };
+
+    // Extract method name from cursor position (permissive)
+    const getMethodMatchAtCursor = (line: string): RegExpMatchArray | null => {
         let match = line.match(methodRegexWithKeywords);
         if (match) return match;
 
-        match = line.match(methodRegexNoKeywords);
+        match = line.match(methodRegexNoKeywordsPermissive);
         if (match) {
-            // Adjust match array to have consistent indices
-            // methodRegexNoKeywords has: [full, returnTypeBase, optionalGeneric, methodName]
-            // We want: [full, returnType, methodName]
-            const returnType = match[1] + (match[2] || ''); // Combine base type with optional generic
+            const returnType = match[1] + (match[2] || '');
             return [match[0], returnType, match[3]];
         }
+        return null;
+    };
 
+    // Extract method name from enclosing method (restrictive)
+    const getEnclosingMethodMatch = (line: string): RegExpMatchArray | null => {
+        let match = line.match(methodRegexWithKeywords);
+        if (match) return match;
+
+        match = line.match(methodRegexNoKeywordsRestrictive);
+        if (match) {
+            const returnType = match[1] + (match[2] || '');
+            return [match[0], returnType, match[3]];
+        }
         return null;
     };
 
@@ -73,7 +113,8 @@ export function activate(context: vscode.ExtensionContext) {
         // Collect lines starting from the current line, until we find the opening parenthesis and closing parenthesis
         let signatureLines = [];
         let foundStart = false;
-        const methodStartPattern = /(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial)|(?:Task|ValueTask|void|int|long|string|bool|IEnumerable|ICollection|IList)/;
+        // Pattern to detect start of method signature: either has a modifier keyword OR looks like "Type MethodName("
+        const methodStartPattern = /(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial)|(?:[\w.<>]+\s+\w+\s*\()/;
 
         for (let i = position.line; i < document.lineCount && signatureLines.length < 10; i++) {
             const text = document.lineAt(i).text.trim();
@@ -112,18 +153,32 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const signatureText = signatureLines.join(' ');
 
-        // Validate it's a method definition
-        if (!isMethodDefinition(signatureText)) {
-            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Make sure cursor is on a method signature.');
+        // Validate it's a method definition at cursor
+        if (!isMethodDefinitionAtCursor(signatureText)) {
+            // DEBUG: Show what we tried to match
+            outputChannel.clear();
+            outputChannel.appendLine('=== METHOD DETECTION FAILED ===');
+            outputChannel.appendLine(`Signature text: "${signatureText}"`);
+            outputChannel.appendLine(`\nTesting patterns:`);
+            outputChannel.appendLine(`  methodRegexWithKeywords: ${methodRegexWithKeywords.test(signatureText)}`);
+            outputChannel.appendLine(`  methodRegexNoKeywordsPermissive: ${methodRegexNoKeywordsPermissive.test(signatureText)}`);
+            outputChannel.appendLine(`  isNonMethodCode: ${isNonMethodCode(signatureText)}`);
+            outputChannel.show(true);
+            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Check Output panel for details.');
             return;
         }
 
-        const match = getMethodMatch(signatureText);
+        const match = getMethodMatchAtCursor(signatureText);
         let methodName = '';
         if (match) {
             methodName = match[2];
         } else {
-            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor.');
+            outputChannel.clear();
+            outputChannel.appendLine('=== METHOD MATCH FAILED ===');
+            outputChannel.appendLine(`Signature text: "${signatureText}"`);
+            outputChannel.appendLine(`Passed isMethodDefinitionAtCursor but getMethodMatchAtCursor returned null`);
+            outputChannel.show(true);
+            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Check Output panel for details.');
             return;
         }
 
@@ -521,12 +576,12 @@ export function activate(context: vscode.ExtensionContext) {
             for (let j = ref.range.start.line; j >= 0; j--) {
                 const line = doc.lineAt(j).text;
 
-                // Use the helper to validate it's actually a method definition
-                if (!isMethodDefinition(line)) {
+                // Use the helper to validate it's actually an enclosing method definition
+                if (!isEnclosingMethodDefinition(line)) {
                     continue;
                 }
 
-                const m = getMethodMatch(line);
+                const m = getEnclosingMethodMatch(line);
                 if (m) {
                     // Find the character position of the method name on the line
                     const methodName = m[2];

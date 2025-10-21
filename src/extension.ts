@@ -155,16 +155,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Validate it's a method definition at cursor
         if (!isMethodDefinitionAtCursor(signatureText)) {
-            // DEBUG: Show what we tried to match
-            outputChannel.clear();
-            outputChannel.appendLine('=== METHOD DETECTION FAILED ===');
-            outputChannel.appendLine(`Signature text: "${signatureText}"`);
-            outputChannel.appendLine(`\nTesting patterns:`);
-            outputChannel.appendLine(`  methodRegexWithKeywords: ${methodRegexWithKeywords.test(signatureText)}`);
-            outputChannel.appendLine(`  methodRegexNoKeywordsPermissive: ${methodRegexNoKeywordsPermissive.test(signatureText)}`);
-            outputChannel.appendLine(`  isNonMethodCode: ${isNonMethodCode(signatureText)}`);
-            outputChannel.show(true);
-            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Check Output panel for details.');
+            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Make sure cursor is on a method signature.');
             return;
         }
 
@@ -173,12 +164,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (match) {
             methodName = match[2];
         } else {
-            outputChannel.clear();
-            outputChannel.appendLine('=== METHOD MATCH FAILED ===');
-            outputChannel.appendLine(`Signature text: "${signatureText}"`);
-            outputChannel.appendLine(`Passed isMethodDefinitionAtCursor but getMethodMatchAtCursor returned null`);
-            outputChannel.show(true);
-            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Check Output panel for details.');
+            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor.');
             return;
         }
 

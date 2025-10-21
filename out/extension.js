@@ -679,7 +679,7 @@ function activate(context) {
     // Register command to clear the tree
     let clearTreeCommand = vscode.commands.registerCommand('nixUpstreamCheck.clearTree', () => {
         treeDataProvider.clearTree();
-        vscode.window.showInformationMessage('Tree cleared. Run "Check Method Callers" to start a new search.');
+        vscode.window.showInformationMessage('Tree cleared. Run "Check Upstream" to start a new search.');
     });
     context.subscriptions.push(clearTreeCommand);
     // Register command to export tree as JSON
@@ -775,42 +775,49 @@ class NixUpstreamTreeProvider {
         this._onDidChangeTreeData.fire();
     }
     // Depth-first traversal: returns true if this node or any descendants are checked
-    // Auto-checks parents on the way back up if any child returned true
-    normalizeCheckStates(tree) {
+    // MUST traverse entire tree - cannot return early or siblings won't be processed!
+    normalizeCheckStates(tree, depth = 0, debugOutput) {
         let hasCheckedDescendant = false;
-        // DEPTH-FIRST: Recurse into children first
+        // FIRST: ALWAYS traverse ALL children - never return early!
         if (tree.children && tree.children.length > 0) {
             for (const child of tree.children) {
-                if (this.normalizeCheckStates(child)) {
+                // MUST call normalize on every child, even if we already found a checked one
+                const childHasChecked = this.normalizeCheckStates(child, depth + 1, debugOutput);
+                if (childHasChecked) {
                     hasCheckedDescendant = true;
                 }
             }
         }
-        // Check reference locations (leaf nodes)
+        // SECOND: Check ALL reference locations - never break early!
         if (tree.referenceLocations && tree.referenceLocations.length > 0) {
             for (const ref of tree.referenceLocations) {
-                if (this.getCheckboxState(ref)) {
+                // IMPORTANT: Reference locations in the array don't have isReference flag
+                // but the UI nodes created from them do. We need to check using the SAME key
+                // that was used when the checkbox was stored (which includes isReference: true)
+                const refAsUINode = {
+                    file: ref.file,
+                    line: ref.line,
+                    character: ref.character,
+                    isReference: true // This is what makes the key match!
+                };
+                const refChecked = this.getCheckboxState(refAsUINode);
+                if (refChecked) {
                     hasCheckedDescendant = true;
-                    break;
                 }
             }
         }
-        // ON THE WAY BACK UP: Check this node's state
+        // THIRD: Check if this node itself is checked
         const wasChecked = this.getCheckboxState(tree);
-        // If any descendant is checked, auto-check this node
-        if (hasCheckedDescendant) {
-            if (!wasChecked) {
-                const nodeKey = this.getNodeKey(tree);
-                this.checkedStates.set(nodeKey, true);
-            }
-            return true;
-        }
-        // If this node itself is checked, return true
         if (wasChecked) {
-            return true;
+            hasCheckedDescendant = true;
         }
-        // Nothing checked in this branch
-        return false;
+        // FINALLY: ON THE WAY BACK UP: If any descendant is checked, auto-check this node
+        if (hasCheckedDescendant && !wasChecked) {
+            const nodeKey = this.getNodeKey(tree);
+            this.checkedStates.set(nodeKey, true);
+        }
+        // Return whether this node or any descendant is checked
+        return hasCheckedDescendant;
     }
     // DIAGNOSTIC version - normalizes checkboxes but doesn't delete anything
     pruneUncheckedItemsDiagnostic(outputChannel) {
@@ -820,7 +827,7 @@ class NixUpstreamTreeProvider {
         }
         // STEP 1: Normalize the tree - auto-check parents of checked descendants
         for (const tree of this.callTrees) {
-            this.normalizeCheckStates(tree);
+            this.normalizeCheckStates(tree, 0, outputChannel);
         }
         if (outputChannel) {
             outputChannel.appendLine(`Normalization complete.\n`);
@@ -897,65 +904,100 @@ class NixUpstreamTreeProvider {
     // Prune unchecked items from the tree
     pruneUncheckedItems(outputChannel) {
         let prunedCount = 0;
-        if (outputChannel) {
-            outputChannel.appendLine(`\n=== STEP 1: NORMALIZING TREE (auto-checking parents) ===`);
+        // Check if debug output is enabled
+        const config = vscode.workspace.getConfiguration('nixUpstreamCheck');
+        const debugEnabled = config.get('enablePruneDebugOutput', false);
+        let debugOutput;
+        if (debugEnabled) {
+            if (!outputChannel) {
+                debugOutput = vscode.window.createOutputChannel('Nix Upstream Check - Prune Debug');
+            }
+            else {
+                debugOutput = outputChannel;
+            }
+            debugOutput.clear();
+            debugOutput.show(true);
+            debugOutput.appendLine('=== PRUNE DEBUG ===');
+            debugOutput.appendLine(`Total trees: ${this.callTrees.length}`);
+            debugOutput.appendLine(`Checkbox states BEFORE normalization: ${this.checkedStates.size}`);
         }
         // STEP 1: Normalize the tree - auto-check parents of checked descendants
         for (const tree of this.callTrees) {
-            this.normalizeCheckStates(tree);
+            this.normalizeCheckStates(tree, 0, debugOutput);
         }
-        if (outputChannel) {
-            outputChannel.appendLine(`Normalization complete.\n`);
-        }
-        if (outputChannel) {
-            outputChannel.appendLine(`\n=== STEP 2: PRUNING UNCHECKED NODES ===\n`);
+        if (debugEnabled && debugOutput) {
+            debugOutput.appendLine(`Checkbox states AFTER normalization: ${this.checkedStates.size}`);
+            debugOutput.appendLine('\nAll checked states after normalization:');
+            this.checkedStates.forEach((checked, key) => {
+                if (checked) {
+                    debugOutput.appendLine(`  ✓ ${key}`);
+                }
+            });
+            debugOutput.appendLine('\n=== STARTING PRUNING ===');
         }
         // STEP 2: Now prune - any node that's still unchecked has no checked descendants
         const pruneTree = (tree, depth = 0) => {
-            const indent = '  '.repeat(depth);
-            const nodeName = tree.name || 'unnamed';
             const isChecked = this.getCheckboxState(tree);
-            if (outputChannel) {
-                outputChannel.appendLine(`${indent}Processing ${nodeName}: checked=${isChecked}`);
+            if (debugEnabled && debugOutput) {
+                const indent = '  '.repeat(depth);
+                const nodeName = tree.name || 'unnamed';
+                const nodeKey = this.getNodeKey(tree);
+                debugOutput.appendLine(`${indent}${nodeName} (key: ${nodeKey}): checked=${isChecked}`);
             }
             // If this node is unchecked after normalization, it has no checked descendants
             if (!isChecked) {
-                if (outputChannel) {
-                    outputChannel.appendLine(`${indent}  PRUNING ${nodeName} (unchecked, no checked descendants)`);
+                if (debugEnabled && debugOutput) {
+                    const indent = '  '.repeat(depth);
+                    const nodeName = tree.name || 'unnamed';
+                    debugOutput.appendLine(`${indent}  ❌ DELETING ${nodeName}`);
                 }
                 prunedCount++;
                 return null;
             }
-            // This node is checked - keep it and recursively prune children
-            if (outputChannel) {
-                outputChannel.appendLine(`${indent}  KEEPING ${nodeName} (checked)`);
+            if (debugEnabled && debugOutput) {
+                const indent = '  '.repeat(depth);
+                const nodeName = tree.name || 'unnamed';
+                debugOutput.appendLine(`${indent}  ✓ KEEPING ${nodeName}`);
             }
-            // Recursively prune children
+            // This node is checked - keep it and recursively prune children
             if (tree.children && tree.children.length > 0) {
                 const beforeCount = tree.children.length;
                 tree.children = tree.children
                     .map((child) => pruneTree(child, depth + 1))
                     .filter((child) => child !== null);
-                if (outputChannel && beforeCount !== tree.children.length) {
-                    outputChannel.appendLine(`${indent}    Children: ${beforeCount} -> ${tree.children.length}`);
+                const afterCount = tree.children.length;
+                if (debugEnabled && debugOutput && beforeCount !== afterCount) {
+                    const indent = '  '.repeat(depth);
+                    debugOutput.appendLine(`${indent}  Children: ${beforeCount} -> ${afterCount}`);
                 }
             }
             // Prune unchecked reference locations
             if (tree.referenceLocations && tree.referenceLocations.length > 0) {
                 const beforeCount = tree.referenceLocations.length;
                 tree.referenceLocations = tree.referenceLocations.filter((ref) => {
-                    const isRefChecked = this.getCheckboxState(ref);
+                    // Use the same key format fix as in normalizeCheckStates
+                    const refAsUINode = {
+                        file: ref.file,
+                        line: ref.line,
+                        character: ref.character,
+                        isReference: true
+                    };
+                    const isRefChecked = this.getCheckboxState(refAsUINode);
+                    if (debugEnabled && debugOutput) {
+                        const indent = '  '.repeat(depth);
+                        const refKey = this.getNodeKey(refAsUINode);
+                        debugOutput.appendLine(`${indent}  Ref ${refKey}: checked=${isRefChecked}`);
+                    }
                     if (!isRefChecked) {
                         prunedCount++;
-                        if (outputChannel) {
-                            outputChannel.appendLine(`${indent}    Pruning ref: ${ref.file}:${ref.line}`);
-                        }
                         return false;
                     }
                     return true;
                 });
-                if (outputChannel && beforeCount !== tree.referenceLocations.length) {
-                    outputChannel.appendLine(`${indent}    Refs: ${beforeCount} -> ${tree.referenceLocations.length}`);
+                const afterCount = tree.referenceLocations.length;
+                if (debugEnabled && debugOutput && beforeCount !== afterCount) {
+                    const indent = '  '.repeat(depth);
+                    debugOutput.appendLine(`${indent}  Refs: ${beforeCount} -> ${afterCount}`);
                 }
             }
             return tree;
@@ -966,10 +1008,10 @@ class NixUpstreamTreeProvider {
             .filter((tree) => tree !== null);
         this.rootNodes = [];
         this._onDidChangeTreeData.fire();
-        if (outputChannel) {
-            outputChannel.appendLine(`\n=== PRUNE COMPLETE ===`);
-            outputChannel.appendLine(`Total items pruned: ${prunedCount}`);
-            outputChannel.appendLine(`Remaining trees: ${this.callTrees.length}`);
+        if (debugEnabled && debugOutput) {
+            debugOutput.appendLine(`\n=== PRUNE COMPLETE ===`);
+            debugOutput.appendLine(`Total items deleted: ${prunedCount}`);
+            debugOutput.appendLine(`Remaining trees: ${this.callTrees.length}`);
         }
         return prunedCount;
     }
@@ -1087,7 +1129,7 @@ class NixUpstreamTreeProvider {
                 new NixUpstreamNode('1. Build your project first (dotnet build)', '', false, undefined, vscode.TreeItemCollapsibleState.None),
                 new NixUpstreamNode('2. Wait for C# extension to finish loading', '', false, undefined, vscode.TreeItemCollapsibleState.None),
                 new NixUpstreamNode('3. Place cursor on a C# method', '', false, undefined, vscode.TreeItemCollapsibleState.None),
-                new NixUpstreamNode('4. Right-click → "Check Method Callers"', '', false, undefined, vscode.TreeItemCollapsibleState.None),
+                new NixUpstreamNode('4. Right-click → "Check Upstream"', '', false, undefined, vscode.TreeItemCollapsibleState.None),
                 new NixUpstreamNode('', '', false, undefined, vscode.TreeItemCollapsibleState.None),
                 new NixUpstreamNode('⚠️ Important: Ensure code is saved and built', '', false, undefined, vscode.TreeItemCollapsibleState.None),
                 new NixUpstreamNode('for accurate reference detection!', '', false, undefined, vscode.TreeItemCollapsibleState.None)

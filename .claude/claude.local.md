@@ -4,6 +4,12 @@ This file is used to store local configuration and settings for Claude. It is no
 
 This is intended to provide context for the current work session.
 
+## IMPORTANT: Version Numbering
+
+**DO NOT bump the version number in package.json unless explicitly asked by the user.**
+
+The user will test changes before deciding to bump the version. Only increment the version when the user specifically requests it.
+
 This project is an extension for VSCode, specifically to discover upstream methods that could be affected by code changes. It uses several methods, relying on the C# extensions already installed.
 
 As currently implemented, the extension successfully identifies methods or interfaces at the current cursor position, and builds a tree of upstream methods that could be affected by changes to the selected method.
@@ -88,8 +94,33 @@ When debugging issues with tree operations (pruning, checkbox states, etc.):
 4. Once normalization (auto-checking parents) works, re-enable deletion
 5. Move debug output behind configuration flag for production
 
-Problem 2:
+Problem 2: Class Change Impact Analysis
 
-The need to triage for upstream changes can also be triggered by a change to a class. I need to add the ability to detect when a class is selected, in which case we need to identify references to that class, and then identify all methods that call those references, recursively, building the same kind of tree as for a method.
+The need to triage for upstream changes can also be triggered by a change to a class definition (e.g., adding a property). The goal is to identify where this class is used in ways that might be affected by the change.
 
-This is a more complex problem because classes can be referenced in many ways: as method parameters, as return types, as local variables, as fields, etc. The extension will need to be able to identify all these references and then build the upstream call tree accordingly.
+### Specific Requirements:
+
+When a class is selected, identify references where the class is:
+1. **[N] New/Instantiation** - `new MyClass()` - Creating new instances
+2. **[P] Parameter** - Methods that accept the class as a parameter
+
+**Not needed**: Variable declarations/assignments can be ascertained through other means.
+
+### Approach:
+
+1. Detect when cursor is on a class definition (`class MyClassName` or `public class MyClassName`)
+2. Use VSCode's Reference Provider to find all references to the class
+3. For each reference, determine if it's:
+   - A `new` instantiation → Mark as **N**
+   - A method parameter → Mark as **P**
+   - Skip other reference types (variable declarations, return types, etc.)
+4. Build the upstream call tree from methods containing **N** or **P** references
+5. Display in the same tree structure with type indicators
+
+### Implementation Notes:
+
+- Class detection regex: `/\b(?:public|private|protected|internal)?\s*(?:abstract|sealed|static|partial)?\s*class\s+(\w+)/`
+- For instantiation detection: Look for `new ClassName(` pattern in the reference line
+- For parameter detection: Check if the reference is inside method parameter list (between method name's `(` and method body's `{`)
+- Reuse existing tree structure and pruning logic
+- Add **N** and **P** to type indicators alongside **M, C, S, O, I**

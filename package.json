@@ -2,9 +2,14 @@
   "name": "nix-upstream-check",
   "displayName": "Nix Upstream Check",
   "description": "Find all upstream references to a C# function and display the call tree.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "NigelWGMajor",
   "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NigelWGMajor/nix-upstream-check"
+  },
   "engines": {
     "vscode": ">=1.70.0"
   },
@@ -12,8 +17,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:csharp",
-    "onCommand:nixUpstreamCheck.start"
+    "onLanguage:csharp"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -53,7 +57,7 @@
       },
       {
         "command": "nixUpstreamCheck.exportJson",
-        "title": "Export as JSON",
+        "title": "Save Upstream JSON",
         "icon": "$(save)"
       },
       {
@@ -65,6 +69,20 @@
         "command": "nixUpstreamCheck.pruneUnchecked",
         "title": "Prune Unchecked Items",
         "icon": "$(filter)"
+      },
+      {
+        "command": "nixUpstreamCheck.searchUpstreamFromReference",
+        "title": "Search Upstream from Here"
+      },
+      {
+        "command": "nixUpstreamCheck.importJson",
+        "title": "Load Upstream JSON",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "nixUpstreamCheck.addCurrentLine",
+        "title": "Add Current Line",
+        "icon": "$(add)"
       }
     ],
     "menus": {
@@ -80,32 +98,54 @@
           "command": "nixUpstreamCheck.exhaustiveSearch",
           "when": "view == nixUpstreamCheckTree && viewItem == nixUpstreamNode",
           "group": "inline"
+        },
+        {
+          "command": "nixUpstreamCheck.searchUpstreamFromReference",
+          "when": "view == nixUpstreamCheckTree && viewItem == nixUpstreamReference",
+          "group": "navigation"
         }
       ],
       "view/title": [
         {
+          "command": "nixUpstreamCheck.addCurrentLine",
+          "when": "view == nixUpstreamCheckTree",
+          "group": "navigation@1"
+        },
+        {
           "command": "nixUpstreamCheck.expandAll",
           "when": "view == nixUpstreamCheckTree",
-          "group": "navigation"
+          "group": "navigation@2"
+        },
+        {
+          "command": "nixUpstreamCheck.importJson",
+          "when": "view == nixUpstreamCheckTree",
+          "group": "navigation@3"
         },
         {
           "command": "nixUpstreamCheck.exportJson",
           "when": "view == nixUpstreamCheckTree",
-          "group": "navigation"
+          "group": "navigation@4"
         },
         {
           "command": "nixUpstreamCheck.exportMarkdown",
           "when": "view == nixUpstreamCheckTree",
-          "group": "navigation"
+          "group": "navigation@5"
         },
         {
           "command": "nixUpstreamCheck.pruneUnchecked",
           "when": "view == nixUpstreamCheckTree",
-          "group": "navigation"
+          "group": "navigation@6"
         },
         {
           "command": "nixUpstreamCheck.clearTree",
           "when": "view == nixUpstreamCheckTree",
+          "group": "navigation@7"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "nixUpstreamCheck.importJson",
+          "when": "resourceExtname == .json && resourceFilename =~ /\\.upstream\\.json$/",
           "group": "navigation"
         }
       ]
@@ -114,7 +154,7 @@
       "activitybar": [
         {
           "id": "nixUpstreamCheckSidebar",
-          "title": "Nix Upstream",
+          "title": "Upstream",
           "icon": "media/tree.svg"
         }
       ]
@@ -123,7 +163,7 @@
       "nixUpstreamCheckSidebar": [
         {
           "id": "nixUpstreamCheckTree",
-          "name": "Upstream Call Tree"
+          "name": ""
         }
       ]
     }

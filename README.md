@@ -13,9 +13,9 @@ A Visual Studio Code extension for C# developers that traces and visualizes all 
 ### 📊 Interactive Tree View
 - **Reference locations**: See exact file locations (📍) where each method is called
 - **Clickable nodes**: Jump directly to any method definition or reference location
-- **Checkboxes**: Mark items as reviewed/handled
+- **Checkboxes**: Mark items for review or attention, prune unneeded items
 - **Multiple searches**: Accumulate results from multiple searches in the same tree
-- **Auto-expand**: Tree automatically expands to show your results
+- **Manual additions**: A button allows you to manually add the current line reference below the tree
 
 ### 🛠️ Powerful Tools
 - **Expand All**: Recursively expand the entire tree
@@ -31,6 +31,10 @@ A Visual Studio Code extension for C# developers that traces and visualizes all 
 2. **Place your cursor** on any C# method definition
 3. **Right-click** and select **"Check Method Callers"**
 4. The sidebar will open automatically showing the call tree
+
+## Persistence
+
+If you save the treeview as xxx.upstream.json you can load it directly from the explorer by right-click `Load as Upstream Json` or double-clicking the file.
 
 ### Tree Structure
 

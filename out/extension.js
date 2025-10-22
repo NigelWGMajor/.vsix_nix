@@ -44,6 +44,9 @@ function activate(context) {
     // Pattern 2b: RESTRICTIVE - for finding enclosing methods (known return types only)
     // Used during reference search to avoid false positives like variable declarations
     const methodRegexNoKeywordsRestrictive = /^\s*(Task|ValueTask|void|int|long|string|bool|double|float|decimal|byte|char|short|object|IEnumerable|ICollection|IList|IAsyncEnumerable|List|Dictionary|Action|Func)(<[\s\S]*?>)?\s+(\w+)\s*\(/;
+    // Pattern for class detection
+    // Matches: class MyClass, public class MyClass, public sealed class MyClass, etc.
+    const classRegex = /\b(?:public|private|protected|internal)?\s*(?:abstract|sealed|static|partial)?\s*class\s+(\w+)/;
     // Helper function: check if line looks like code that's NOT a method definition
     const isNonMethodCode = (line) => {
         const trimmed = line.trim();
@@ -164,9 +167,17 @@ function activate(context) {
             }
         }
         const signatureText = signatureLines.join(' ');
+        // Try to detect class definition first
+        const classMatch = signatureText.match(classRegex);
+        if (classMatch) {
+            const className = classMatch[1];
+            // Handle class change impact analysis
+            await handleClassChangeAnalysis(className, document, position, outputChannel, context);
+            return;
+        }
         // Validate it's a method definition at cursor
         if (!isMethodDefinitionAtCursor(signatureText)) {
-            vscode.window.showWarningMessage('Could not detect a C# method definition at the cursor. Make sure cursor is on a method signature.');
+            vscode.window.showWarningMessage('Could not detect a C# method or class definition at the cursor. Make sure cursor is on a method signature or class definition.');
             return;
         }
         const match = getMethodMatchAtCursor(signatureText);
@@ -215,10 +226,9 @@ function activate(context) {
         let apiUsedGlobal = '';
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: `Searching upstream references for ${methodName}`,
+            title: `Searching upstream: ${methodName}`,
             cancellable: true
         }, async (progress, token) => {
-            progress.report({ message: `🔍 Using C# Language Server APIs...` });
             const result = await findUpstreamReferences(methodName, namespaceName, document.uri, position, progress, token, outputChannel);
             // Replace the initial tree (last one added) with the completed result
             treeDataProvider.replaceLastTree(result.tree);
@@ -264,6 +274,216 @@ function activate(context) {
         }
         return references;
     }
+    // Handle class change impact analysis
+    async function handleClassChangeAnalysis(className, document, position, outputChannel, context) {
+        // Open the sidebar panel
+        await vscode.commands.executeCommand('nixUpstreamCheckTree.focus');
+        // Search upwards for namespace
+        let namespaceName = '';
+        for (let i = position.line; i >= 0; i--) {
+            const nsMatch = document.lineAt(i).text.match(/namespace\s+([\w\.]+)/);
+            if (nsMatch) {
+                namespaceName = nsMatch[1];
+                break;
+            }
+        }
+        outputChannel.clear();
+        outputChannel.appendLine('=== Nix Upstream Check - Class Change Analysis ===');
+        outputChannel.appendLine(`Class: ${className}`);
+        outputChannel.appendLine(`Namespace: ${namespaceName}`);
+        outputChannel.appendLine(`File: ${document.uri.fsPath}`);
+        outputChannel.appendLine(`Position: line ${position.line}`);
+        outputChannel.appendLine('');
+        outputChannel.show(true);
+        // Use Reference Provider to find all class references
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: `Analyzing class: ${className}`,
+            cancellable: true
+        }, async (progress, token) => {
+            // Find all references to the class
+            const references = await vscode.commands.executeCommand('vscode.executeReferenceProvider', document.uri, position);
+            if (!references || references.length === 0) {
+                vscode.window.showInformationMessage(`No references found for class ${className}`);
+                return;
+            }
+            outputChannel.appendLine(`Found ${references.length} references to analyze`);
+            // Analyze each reference to determine type (N = new, P = parameter)
+            const categorizedRefs = [];
+            for (const ref of references) {
+                // Skip the class definition itself
+                if (ref.uri.fsPath === document.uri.fsPath && ref.range.start.line === position.line) {
+                    continue;
+                }
+                const refDoc = await vscode.workspace.openTextDocument(ref.uri);
+                const refLine = refDoc.lineAt(ref.range.start.line).text.trim();
+                // Skip comments and string literals
+                if (refLine.startsWith('//') || refLine.startsWith('/*') || refLine.startsWith('*')) {
+                    continue;
+                }
+                // Skip using statements
+                if (refLine.startsWith('using ') || refLine.includes('using ')) {
+                    continue;
+                }
+                // Skip namespace declarations
+                if (refLine.includes('namespace ')) {
+                    continue;
+                }
+                // Skip inheritance declarations (: BaseClass)
+                if (refLine.includes(': ' + className) || refLine.includes(',' + className)) {
+                    // Only skip if it's part of class/interface definition line
+                    if (refLine.includes('class ') || refLine.includes('interface ') || refLine.includes('struct ')) {
+                        continue;
+                    }
+                }
+                // Check if it's a 'new' instantiation
+                const newPattern = new RegExp(`new\\s+${className}\\s*\\(`);
+                if (newPattern.test(refLine)) {
+                    // Find the enclosing method
+                    const enclosingInfo = findEnclosingMethod(refDoc, ref.range.start.line);
+                    if (enclosingInfo) { // Only add if we found an enclosing method
+                        categorizedRefs.push({
+                            location: ref,
+                            type: 'N',
+                            enclosingMethod: enclosingInfo.name,
+                            enclosingMethodLocation: enclosingInfo.location
+                        });
+                    }
+                    continue;
+                }
+                // Check if it's a parameter (inside method signature before opening brace)
+                const isParameter = isClassUsedAsParameter(refDoc, ref.range.start.line, className);
+                if (isParameter) {
+                    const enclosingInfo = findEnclosingMethod(refDoc, ref.range.start.line);
+                    if (enclosingInfo) { // Only add if we found an enclosing method
+                        categorizedRefs.push({
+                            location: ref,
+                            type: 'P',
+                            enclosingMethod: enclosingInfo.name,
+                            enclosingMethodLocation: enclosingInfo.location
+                        });
+                    }
+                    continue;
+                }
+                // Skip other types (variable declarations, return types, etc.)
+                // Don't add to categorizedRefs to reduce noise in output
+            }
+            const nCount = categorizedRefs.filter(r => r.type === 'N').length;
+            const pCount = categorizedRefs.filter(r => r.type === 'P').length;
+            outputChannel.appendLine(`\nCategorized references:`);
+            outputChannel.appendLine(`  [N] New/Instantiation: ${nCount}`);
+            outputChannel.appendLine(`  [P] Parameter: ${pCount}`);
+            outputChannel.appendLine(`  Total relevant: ${categorizedRefs.length}`);
+            if (categorizedRefs.length === 0) {
+                vscode.window.showInformationMessage(`No [N]ew or [P]arameter references found for ${className}`);
+                return;
+            }
+            progress.report({ message: `Found ${nCount} [N] and ${pCount} [P] refs` });
+            // Group by enclosing method and build trees
+            const methodGroups = new Map();
+            for (const ref of categorizedRefs) {
+                if (!ref.enclosingMethod || !ref.enclosingMethodLocation)
+                    continue;
+                const key = `${ref.location.uri.fsPath}:${ref.enclosingMethodLocation.line}:${ref.enclosingMethod}`;
+                if (!methodGroups.has(key)) {
+                    methodGroups.set(key, []);
+                }
+                methodGroups.get(key).push(ref);
+            }
+            // Build tree structure similar to method caller tree
+            const initialTree = {
+                name: className,
+                namespace: namespaceName,
+                file: document.uri.fsPath,
+                line: position.line,
+                isClass: true,
+                children: []
+            };
+            // For each method that references the class, add it as a child
+            for (const [key, refs] of methodGroups) {
+                const firstRef = refs[0];
+                if (!firstRef.enclosingMethod || !firstRef.enclosingMethodLocation)
+                    continue;
+                // Get namespace for the method
+                const methodDoc = await vscode.workspace.openTextDocument(firstRef.location.uri);
+                let methodNamespace = '';
+                for (let i = firstRef.enclosingMethodLocation.line; i >= 0; i--) {
+                    const nsMatch = methodDoc.lineAt(i).text.match(/namespace\s+([\w\.]+)/);
+                    if (nsMatch) {
+                        methodNamespace = nsMatch[1];
+                        break;
+                    }
+                }
+                const methodNode = {
+                    name: firstRef.enclosingMethod,
+                    namespace: methodNamespace,
+                    file: firstRef.location.uri.fsPath,
+                    line: firstRef.enclosingMethodLocation.line,
+                    character: firstRef.enclosingMethodLocation.character,
+                    children: [],
+                    referenceLocations: refs.map(r => ({
+                        file: r.location.uri.fsPath,
+                        line: r.location.range.start.line,
+                        character: r.location.range.start.character,
+                        referenceType: r.type // Add type indicator (N or P)
+                    }))
+                };
+                initialTree.children.push(methodNode);
+            }
+            treeDataProvider.addCallTree(initialTree);
+            // Auto-expand the tree root
+            const rootNodes = treeDataProvider.getRootNodes();
+            if (rootNodes && rootNodes.length > 0) {
+                const latestRoot = rootNodes[rootNodes.length - 1];
+                await treeView.reveal(latestRoot, { select: false, focus: false, expand: true });
+            }
+            vscode.window.showInformationMessage(`✅ Class impact analysis complete for ${className}: ${categorizedRefs.length} relevant references found`);
+        });
+    }
+    // Helper: Check if class is used as a parameter in a method signature
+    function isClassUsedAsParameter(doc, lineNumber, className) {
+        // Look at current line and potentially previous lines to find method signature
+        let signatureText = '';
+        let foundMethodStart = false;
+        for (let i = lineNumber; i >= Math.max(0, lineNumber - 5); i--) {
+            const lineText = doc.lineAt(i).text;
+            signatureText = lineText + ' ' + signatureText;
+            // Check if we've found a method definition
+            if (methodRegexWithKeywords.test(lineText) || methodRegexNoKeywordsRestrictive.test(lineText)) {
+                foundMethodStart = true;
+                break;
+            }
+            // If we hit an opening brace without finding a method, this isn't a parameter
+            if (lineText.includes('{')) {
+                return false;
+            }
+        }
+        if (!foundMethodStart) {
+            return false;
+        }
+        // Check if className appears between '(' and ')' in the signature
+        const paramPattern = new RegExp(`\\(([^)]*\\b${className}\\b[^)]*)\\)`);
+        return paramPattern.test(signatureText);
+    }
+    // Helper: Find enclosing method for a given line
+    function findEnclosingMethod(doc, lineNumber) {
+        // Search upwards to find the containing method
+        for (let i = lineNumber; i >= 0; i--) {
+            const lineText = doc.lineAt(i).text;
+            if (isEnclosingMethodDefinition(lineText)) {
+                const match = getEnclosingMethodMatch(lineText);
+                if (match) {
+                    const methodName = match[2];
+                    const character = lineText.indexOf(methodName);
+                    return {
+                        name: methodName,
+                        location: { line: i, character }
+                    };
+                }
+            }
+        }
+        return null;
+    }
     async function findUpstreamReferences(methodName, namespaceName, documentUri, position, progress, token, outputChannel, visited = new Set(), depth = 0, forceFileScan = false) {
         const emptyTree = { name: methodName, namespace: namespaceName, file: documentUri.fsPath, line: position.line, children: [] };
         // Check for cancellation
@@ -276,42 +496,14 @@ function activate(context) {
             return { tree: emptyTree, apiUsed: '' };
         }
         visited.add(methodKey);
-        // Report progress
-        if (progress && depth === 0) {
-            progress.report({ message: `🔍 Querying language server APIs for ${methodName}...` });
-        }
-        else if (progress) {
-            progress.report({ message: `Analyzing ${methodName} (depth ${depth})...` });
-        }
         // Try multiple APIs in priority order
         let references;
         let apiUsed = '';
-        // Log to output channel
-        if (outputChannel) {
-            outputChannel.appendLine(`\n--- Attempting API calls at depth ${depth} for ${methodName} ---`);
-            outputChannel.appendLine(`  File: ${documentUri.fsPath}`);
-            outputChannel.appendLine(`  Position: line ${position.line}, char ${position.character} (method name should be at this position)`);
-        }
         // Strategy 1: Try Call Hierarchy API (best for finding callers)
         try {
-            if (progress && depth === 0) {
-                progress.report({ message: `Trying Call Hierarchy API...` });
-            }
-            if (outputChannel) {
-                outputChannel.appendLine('Strategy 1: Call Hierarchy API');
-            }
             const callHierarchy = await vscode.commands.executeCommand('vscode.prepareCallHierarchy', documentUri, position);
-            if (outputChannel) {
-                outputChannel.appendLine(`  prepareCallHierarchy: ${callHierarchy ? `returned ${callHierarchy.length} items` : 'null/undefined'}`);
-            }
             if (callHierarchy && callHierarchy.length > 0) {
-                if (outputChannel) {
-                    outputChannel.appendLine(`  Item 0: ${JSON.stringify({ name: callHierarchy[0].name, kind: callHierarchy[0].kind, uri: callHierarchy[0].uri?.fsPath })}`);
-                }
                 const incomingCalls = await vscode.commands.executeCommand('vscode.provideIncomingCalls', callHierarchy[0]);
-                if (outputChannel) {
-                    outputChannel.appendLine(`  provideIncomingCalls: ${incomingCalls ? `returned ${incomingCalls.length} calls` : 'null/undefined'}`);
-                }
                 if (incomingCalls && incomingCalls.length > 0) {
                     references = incomingCalls.map((call) => {
                         // Each incoming call has 'from' (the caller) and 'fromRanges' (call sites)
@@ -321,113 +513,45 @@ function activate(context) {
                         return new vscode.Location(call.from.uri, fromRange);
                     });
                     apiUsed = 'Call Hierarchy';
-                    if (progress && depth === 0) {
-                        progress.report({ message: `✅ Call Hierarchy API found ${references.length} callers` });
-                    }
-                    if (outputChannel) {
-                        outputChannel.appendLine(`  ✅ SUCCESS: Found ${references.length} callers`);
-                    }
                 }
             }
         }
         catch (error) {
-            // Call Hierarchy not supported or failed
-            if (outputChannel) {
-                outputChannel.appendLine(`  ❌ ERROR: ${error}`);
-            }
-            if (progress && depth === 0) {
-                progress.report({ message: `Call Hierarchy API error: ${error}` });
-            }
+            // Call Hierarchy not supported or failed - silently continue to next strategy
         }
         // Strategy 2: Try CodeLens provider (this is what shows reference counts)
         if (!references || references.length === 0) {
             try {
-                if (progress && depth === 0) {
-                    progress.report({ message: `Trying CodeLens API...` });
-                }
-                if (outputChannel) {
-                    outputChannel.appendLine('Strategy 2: CodeLens API');
-                }
                 const codeLenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', documentUri);
-                if (outputChannel) {
-                    outputChannel.appendLine(`  executeCodeLensProvider: ${codeLenses ? `returned ${codeLenses.length} lenses` : 'null/undefined'}`);
-                }
                 if (codeLenses && codeLenses.length > 0) {
                     // Find CodeLens near our position (within a few lines)
                     const relevantLens = codeLenses.find(lens => Math.abs(lens.range.start.line - position.line) <= 3);
-                    if (outputChannel) {
-                        outputChannel.appendLine(`  Relevant lens near line ${position.line}: ${relevantLens ? `found at line ${relevantLens.range.start.line}` : 'none found'}`);
-                    }
                     if (relevantLens && relevantLens.command) {
-                        if (outputChannel) {
-                            outputChannel.appendLine(`  CodeLens command: ${relevantLens.command.command}, args: ${relevantLens.command.arguments?.length || 0}`);
-                            if (relevantLens.command.arguments && relevantLens.command.arguments.length > 0) {
-                                outputChannel.appendLine(`  Command args[0] type: ${typeof relevantLens.command.arguments[0]}`);
-                            }
-                        }
                         // CodeLens command often contains reference locations
                         if (relevantLens.command.command === 'editor.action.showReferences' &&
                             relevantLens.command.arguments &&
                             relevantLens.command.arguments.length >= 3) {
                             references = relevantLens.command.arguments[2];
                             apiUsed = 'CodeLens';
-                            if (progress && depth === 0) {
-                                progress.report({ message: `✅ CodeLens API found ${references.length} references` });
-                            }
-                            if (outputChannel) {
-                                outputChannel.appendLine(`  ✅ SUCCESS: Found ${references.length} references`);
-                            }
-                        }
-                        else {
-                            if (outputChannel) {
-                                outputChannel.appendLine(`  CodeLens command is not 'editor.action.showReferences', skipping`);
-                            }
                         }
                     }
                 }
             }
             catch (error) {
-                // CodeLens not supported or failed
-                if (outputChannel) {
-                    outputChannel.appendLine(`  ❌ ERROR: ${error}`);
-                }
-                if (progress && depth === 0) {
-                    progress.report({ message: `CodeLens API error: ${error}` });
-                }
+                // CodeLens not supported or failed - silently continue to next strategy
             }
         }
         // Strategy 3: Try standard Reference Provider
         if (!references || references.length === 0) {
             try {
-                if (progress && depth === 0) {
-                    progress.report({ message: `Trying Reference Provider API...` });
-                }
-                if (outputChannel) {
-                    outputChannel.appendLine('Strategy 3: Reference Provider API');
-                }
                 references = await vscode.commands.executeCommand('vscode.executeReferenceProvider', documentUri, position);
-                if (outputChannel) {
-                    outputChannel.appendLine(`  executeReferenceProvider: ${references ? `returned ${references.length} references` : 'null/undefined'}`);
-                }
                 if (references && references.length > 0) {
                     apiUsed = 'Reference Provider';
-                    if (progress && depth === 0) {
-                        progress.report({ message: `✅ Reference Provider found ${references.length} references` });
-                    }
-                    if (outputChannel) {
-                        outputChannel.appendLine(`  ✅ SUCCESS: Found ${references.length} references`);
-                    }
                 }
             }
             catch (error) {
-                if (outputChannel) {
-                    outputChannel.appendLine(`  ❌ ERROR: ${error}`);
-                }
+                // Reference Provider not supported or failed - silently continue
             }
-        }
-        // Log final state before fallback check
-        if (outputChannel) {
-            outputChannel.appendLine(`\nFinal check: references=${references ? references.length : 'null/undefined'}, apiUsed='${apiUsed}'`);
         }
         // Strategy 4: Manual file scan as last resort
         if (!references || references.length === 0) {
@@ -435,50 +559,15 @@ function activate(context) {
             const config = vscode.workspace.getConfiguration('nixUpstreamCheck');
             const fileScanEnabled = forceFileScan || config.get('enableFileScanFallback', false);
             if (fileScanEnabled) {
-                if (progress) {
-                    progress.report({ message: `⚠️ [depth ${depth}] All language server APIs returned no results. Falling back to file scanning (slow)...` });
-                }
-                if (outputChannel) {
-                    outputChannel.appendLine(`Strategy 4 at depth ${depth}: Manual File Scan (Fallback)`);
-                    outputChannel.appendLine(`  Reason: references=${references}, length=${references?.length}`);
-                    if (depth === 0 && !forceFileScan) {
-                        vscode.window.showWarningMessage('⚠️ All language server APIs failed. Using slow file-scan. Check Output panel for details.', 'View Output').then(selection => {
-                            if (selection === 'View Output') {
-                                outputChannel.show();
-                            }
-                        });
-                    }
-                }
                 references = await manualReferenceSearch(methodName, documentUri, position);
                 apiUsed = 'File Scan (Fallback)';
-                if (outputChannel) {
-                    outputChannel.appendLine(`  File scan at depth ${depth}: found ${references.length} references`);
-                }
             }
             else {
-                if (outputChannel) {
-                    outputChannel.appendLine(`Strategy 4: File scan disabled (enable in settings or use 'Exhaustive Search' context menu)`);
-                }
                 apiUsed = 'No results (file scan disabled)';
             }
         }
-        else {
-            if (outputChannel) {
-                outputChannel.appendLine(`\n✅ Using ${apiUsed} with ${references.length} references - NO fallback needed`);
-            }
-            if (progress && depth === 0) {
-                progress.report({ message: `✅ Using ${apiUsed} - found ${references.length} references` });
-            }
-        }
         if (!references || references.length === 0) {
-            if (depth === 0 && progress) {
-                progress.report({ message: `No references found for ${methodName}. This might be a leaf method or the language server hasn't indexed the workspace yet.` });
-            }
             return { tree: emptyTree, apiUsed };
-        }
-        // Report progress
-        if (progress) {
-            progress.report({ message: `Found ${references.length} references to ${methodName}, analyzing...` });
         }
         // For each reference, find the enclosing method and recurse
         const upstreamNodes = [];
@@ -492,15 +581,32 @@ function activate(context) {
                 continue;
             }
             const doc = await vscode.workspace.openTextDocument(ref.uri);
+            const refLine = doc.lineAt(ref.range.start.line).text;
+            // FILTER: Only process actual method CALLS, not declarations or other references
+            // Check if this line contains a method call pattern: methodName(
+            const methodCallPattern = new RegExp(`\\b${methodName}\\s*\\(`);
+            if (!methodCallPattern.test(refLine)) {
+                // Skip references that aren't method calls (e.g., variable declarations, return types, etc.)
+                continue;
+            }
+            // Also skip method definitions (the reference shouldn't be defining the method)
+            if (methodRegexWithKeywords.test(refLine) || methodRegexNoKeywordsPermissive.test(refLine)) {
+                // This looks like a method signature line, not a call
+                continue;
+            }
             let methodDef = null;
             // Find the enclosing method by searching upwards from the reference
             for (let j = ref.range.start.line; j >= 0; j--) {
                 const line = doc.lineAt(j).text;
-                // Use the helper to validate it's actually an enclosing method definition
-                if (!isEnclosingMethodDefinition(line)) {
+                // Check if it's a method definition (use permissive patterns for method upstream search)
+                if (isNonMethodCode(line)) {
                     continue;
                 }
-                const m = getEnclosingMethodMatch(line);
+                // Try both patterns (with keywords and without)
+                let m = line.match(methodRegexWithKeywords);
+                if (!m) {
+                    m = line.match(methodRegexNoKeywordsPermissive);
+                }
                 if (m) {
                     // Find the character position of the method name on the line
                     const methodName = m[2];
@@ -543,11 +649,11 @@ function activate(context) {
                 methodDef.referenceLocations.push(refLocation);
                 processedMethods.set(methodKey, methodDef);
             }
-            // Report progress per reference
-            if (progress && references.length > 1) {
-                const percent = Math.round(((i + 1) / references.length) * 100);
-                progress.report({ message: `Processing reference ${i + 1}/${references.length} of ${methodName} (${percent}%)` });
-            }
+        }
+        // Report summary after processing all references
+        if (progress && depth === 0) {
+            const totalRefs = Array.from(processedMethods.values()).reduce((sum, m) => sum + (m.referenceLocations?.length || 0), 0);
+            progress.report({ message: `Found ${totalRefs} refs in ${processedMethods.size} methods` });
         }
         // Now process all unique methods found and recurse on them
         for (const [, methodDef] of processedMethods.entries()) {
@@ -658,6 +764,107 @@ function activate(context) {
         vscode.window.showInformationMessage(`Exhaustive search complete for ${methodName}`);
     });
     context.subscriptions.push(exhaustiveSearchCommand);
+    // Register command to search upstream from a reference location
+    let searchUpstreamFromReferenceCommand = vscode.commands.registerCommand('nixUpstreamCheck.searchUpstreamFromReference', async (node) => {
+        if (!node || !node.treeData || !node.treeData.isReference) {
+            vscode.window.showWarningMessage('This command only works on reference locations');
+            return;
+        }
+        const refData = node.treeData;
+        const file = refData.file;
+        const line = refData.line;
+        const character = refData.character || 0;
+        if (!file || typeof line !== 'number') {
+            vscode.window.showWarningMessage('Invalid reference location data');
+            return;
+        }
+        // Open the document to find the enclosing method
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+        // Find the enclosing method by searching upwards
+        let methodDef = null;
+        for (let j = line; j >= 0; j--) {
+            const lineText = doc.lineAt(j).text;
+            // Check if it's a method definition
+            if (isNonMethodCode(lineText)) {
+                continue;
+            }
+            // Try both patterns (with keywords and without)
+            let m = lineText.match(methodRegexWithKeywords);
+            if (!m) {
+                m = lineText.match(methodRegexNoKeywordsPermissive);
+            }
+            if (m) {
+                const methodName = m[2];
+                const methodNameIndex = lineText.indexOf(methodName);
+                // Find namespace for this method
+                let namespace = '';
+                for (let k = j; k >= 0; k--) {
+                    const ns = doc.lineAt(k).text.match(/namespace\s+([\w\.]+)/);
+                    if (ns) {
+                        namespace = ns[1];
+                        break;
+                    }
+                }
+                methodDef = {
+                    name: methodName,
+                    namespace: namespace,
+                    line: j,
+                    character: methodNameIndex >= 0 ? methodNameIndex : 0
+                };
+                break;
+            }
+        }
+        if (!methodDef) {
+            vscode.window.showWarningMessage('Could not find enclosing method for this reference');
+            return;
+        }
+        // Now start the upstream search from the enclosing method
+        outputChannel.clear();
+        outputChannel.appendLine('=== Upstream Search from Reference Location ===');
+        outputChannel.appendLine(`Reference: ${file}:${line + 1}`);
+        outputChannel.appendLine(`Enclosing Method: ${methodDef.name}`);
+        outputChannel.appendLine(`Namespace: ${methodDef.namespace}`);
+        outputChannel.appendLine('');
+        outputChannel.show(true);
+        // Initialize the tree with the enclosing method
+        const initialTree = {
+            name: methodDef.name,
+            namespace: methodDef.namespace,
+            file: file,
+            line: methodDef.line,
+            children: []
+        };
+        treeDataProvider.addCallTree(initialTree);
+        // Start recursive upstream search with progress
+        // Store methodDef in a const to satisfy TypeScript's null checking in async context
+        const enclosingMethod = methodDef;
+        let apiUsedGlobal = '';
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: `Searching upstream references for ${enclosingMethod.name}`,
+            cancellable: true
+        }, async (progress, token) => {
+            progress.report({ message: `🔍 Using C# Language Server APIs...` });
+            const result = await findUpstreamReferences(enclosingMethod.name, enclosingMethod.namespace, vscode.Uri.file(file), new vscode.Position(enclosingMethod.line, enclosingMethod.character), progress, token, outputChannel);
+            // Replace the initial tree (last one added) with the completed result
+            treeDataProvider.replaceLastTree(result.tree);
+            apiUsedGlobal = result.apiUsed;
+            // Auto-expand the newly added tree root
+            const rootNodes = treeDataProvider.getRootNodes();
+            if (rootNodes && rootNodes.length > 0) {
+                const latestRoot = rootNodes[rootNodes.length - 1];
+                await treeView.reveal(latestRoot, { select: false, focus: false, expand: true });
+            }
+            return result.tree;
+        });
+        if (apiUsedGlobal) {
+            vscode.window.showInformationMessage(`✅ Upstream search complete for ${enclosingMethod.name} (using ${apiUsedGlobal})`);
+        }
+        else {
+            vscode.window.showInformationMessage(`✅ Upstream search complete for ${enclosingMethod.name}`);
+        }
+    });
+    context.subscriptions.push(searchUpstreamFromReferenceCommand);
     // Register command to expand all tree nodes
     let expandAllCommand = vscode.commands.registerCommand('nixUpstreamCheck.expandAll', async () => {
         // Helper to delay (using a proper async approach)
@@ -731,10 +938,13 @@ function activate(context) {
             exportedAt: new Date().toISOString(),
             trees: trees.map((tree) => treeDataProvider.serializeTreeWithCheckboxes(tree))
         };
+        // Use the first tree's root member name as default filename
+        const firstTree = trees[0];
+        const defaultName = firstTree.name ? `${firstTree.name}.upstream.json` : 'upstream-references.upstream.json';
         const jsonContent = JSON.stringify(exportData, null, 2);
         const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file('upstream-references.json'),
-            filters: { 'JSON': ['json'] }
+            defaultUri: vscode.Uri.file(defaultName),
+            filters: { 'Upstream JSON': ['upstream.json'] }
         });
         if (uri) {
             const bytes = new Uint8Array(jsonContent.length);
@@ -760,8 +970,11 @@ function activate(context) {
             markdown += treeDataProvider.treeToMarkdown(tree, 0, index + 1);
             markdown += `\n---\n\n`;
         });
+        // Use the first tree's root member name as default filename
+        const firstTree = trees[0];
+        const defaultName = firstTree.name ? `${firstTree.name}.md` : 'upstream-references.md';
         const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file('upstream-references.md'),
+            defaultUri: vscode.Uri.file(defaultName),
             filters: { 'Markdown': ['md'] }
         });
         if (uri) {
@@ -774,6 +987,123 @@ function activate(context) {
         }
     });
     context.subscriptions.push(exportMarkdownCommand);
+    // Register command to import/load .upstream.json files
+    let importJsonCommand = vscode.commands.registerCommand('nixUpstreamCheck.importJson', async (uri) => {
+        // If URI is provided (from file explorer click), use it; otherwise show file picker
+        let fileUri = uri;
+        if (!fileUri) {
+            const result = await vscode.window.showOpenDialog({
+                canSelectFiles: true,
+                canSelectFolders: false,
+                canSelectMany: false,
+                filters: { 'Upstream JSON': ['upstream.json'], 'All Files': ['*'] }
+            });
+            if (result && result.length > 0) {
+                fileUri = result[0];
+            }
+        }
+        if (!fileUri) {
+            return;
+        }
+        try {
+            const fileContent = await vscode.workspace.fs.readFile(fileUri);
+            // Convert Uint8Array to string
+            let jsonContent = '';
+            for (let i = 0; i < fileContent.length; i++) {
+                jsonContent += String.fromCharCode(fileContent[i]);
+            }
+            const importData = JSON.parse(jsonContent);
+            if (!importData.trees || !Array.isArray(importData.trees)) {
+                vscode.window.showErrorMessage('Invalid upstream JSON file format.');
+                return;
+            }
+            // Add imported trees to existing ones (don't clear)
+            importData.trees.forEach((tree) => {
+                treeDataProvider.addCallTree(tree);
+                // Restore checkbox states from the imported tree
+                treeDataProvider.restoreCheckboxStates(tree);
+            });
+            vscode.window.showInformationMessage(`Added ${importData.trees.length} tree(s) from ${fileUri.fsPath}`);
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to import file: ${error}`);
+        }
+    });
+    context.subscriptions.push(importJsonCommand);
+    // Automatically load .upstream.json files when opened
+    const textDocumentListener = vscode.workspace.onDidOpenTextDocument(async (document) => {
+        if (document.fileName.endsWith('.upstream.json')) {
+            // Load the file into the tree view
+            await vscode.commands.executeCommand('nixUpstreamCheck.importJson', document.uri);
+            // Close the text editor and show the sidebar instead
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+            await vscode.commands.executeCommand('nixUpstreamCheckTree.focus');
+        }
+    });
+    context.subscriptions.push(textDocumentListener);
+    // Register command to add current line as a simple item (no upstream search)
+    let addCurrentLineCommand = vscode.commands.registerCommand('nixUpstreamCheck.addCurrentLine', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor.');
+            return;
+        }
+        const document = editor.document;
+        const position = editor.selection.active;
+        const line = document.lineAt(position.line);
+        const lineText = line.text.trim();
+        if (!lineText) {
+            vscode.window.showWarningMessage('Current line is empty.');
+            return;
+        }
+        // Try to extract method/class name from the line
+        let itemName = '';
+        let namespace = '';
+        // Try method patterns first
+        const methodMatch = lineText.match(methodRegexWithKeywords) ||
+            lineText.match(methodRegexNoKeywordsPermissive);
+        if (methodMatch) {
+            // Extract method name (last capture group)
+            itemName = methodMatch[methodMatch.length - 1];
+        }
+        else {
+            // Try class pattern
+            const classMatch = lineText.match(classRegex);
+            if (classMatch) {
+                itemName = classMatch[1];
+            }
+            else {
+                // Fallback: use first word or first identifier
+                const identifierMatch = lineText.match(/\b([A-Za-z_]\w*)\b/);
+                if (identifierMatch) {
+                    itemName = identifierMatch[1];
+                }
+                else {
+                    itemName = lineText.substring(0, 50); // Use first 50 chars
+                }
+            }
+        }
+        // Try to get namespace from document
+        const fullText = document.getText();
+        const namespaceMatch = fullText.match(/namespace\s+([\w.]+)/);
+        if (namespaceMatch) {
+            namespace = namespaceMatch[1];
+        }
+        // Create a simple tree item (no children, just a reference)
+        const simpleItem = {
+            name: itemName,
+            namespace: namespace,
+            file: document.uri.fsPath,
+            line: position.line,
+            character: position.character,
+            children: [],
+            referenceLocations: []
+        };
+        // Add to tree
+        treeDataProvider.addCallTree(simpleItem);
+        vscode.window.showInformationMessage(`Added "${itemName}" to tree.`);
+    });
+    context.subscriptions.push(addCurrentLineCommand);
 }
 exports.activate = activate;
 function deactivate() { }
@@ -1111,18 +1441,45 @@ class NixUpstreamTreeProvider {
         }
         // Add reference locations if present
         if (tree.referenceLocations && tree.referenceLocations.length > 0) {
-            serialized.referenceLocations = tree.referenceLocations.map((ref) => ({
-                file: ref.file,
-                line: ref.line,
-                character: ref.character,
-                checked: this.getCheckboxState(ref)
-            }));
+            serialized.referenceLocations = tree.referenceLocations.map((ref) => {
+                // Create a reference-like object for getNodeKey to match UI nodes
+                const refData = { ...ref, isReference: true };
+                return {
+                    file: ref.file,
+                    line: ref.line,
+                    character: ref.character,
+                    checked: this.getCheckboxState(refData)
+                };
+            });
         }
         // Recursively serialize children
         if (tree.children && tree.children.length > 0) {
             serialized.children = tree.children.map((child) => this.serializeTreeWithCheckboxes(child));
         }
         return serialized;
+    }
+    // Restore checkbox states from imported tree data
+    restoreCheckboxStates(tree) {
+        // Restore the checkbox state for this node
+        if (tree.checked !== undefined) {
+            const key = this.getNodeKey(tree);
+            this.checkedStates.set(key, tree.checked);
+        }
+        // Restore checkbox states for reference locations
+        if (tree.referenceLocations && tree.referenceLocations.length > 0) {
+            tree.referenceLocations.forEach((ref) => {
+                if (ref.checked !== undefined) {
+                    // Create a reference-like object for getNodeKey
+                    const refData = { ...ref, isReference: true };
+                    const key = this.getNodeKey(refData);
+                    this.checkedStates.set(key, ref.checked);
+                }
+            });
+        }
+        // Recursively restore checkbox states for children
+        if (tree.children && tree.children.length > 0) {
+            tree.children.forEach((child) => this.restoreCheckboxStates(child));
+        }
     }
     // Convert tree to Markdown format
     treeToMarkdown(tree, depth, searchNumber) {
@@ -1203,14 +1560,17 @@ class NixUpstreamTreeProvider {
             if (treeData.referenceLocations && treeData.referenceLocations.length > 0) {
                 for (const refLoc of treeData.referenceLocations) {
                     const fileName = refLoc.file.split(/[/\\]/).pop() || refLoc.file;
-                    const label = `📍 ${fileName}:${refLoc.line + 1}`;
+                    // Add reference type indicator if available (N or P for class references)
+                    const refTypePrefix = refLoc.referenceType ? `[${refLoc.referenceType}] ` : '';
+                    const label = `${refTypePrefix}📍 ${fileName}:${refLoc.line + 1}`;
                     // Create a tree data object for the reference location
                     const refTreeData = {
                         name: label,
                         file: refLoc.file,
                         line: refLoc.line,
                         character: refLoc.character,
-                        isReference: true
+                        isReference: true,
+                        referenceType: refLoc.referenceType // Preserve for checkbox key generation
                     };
                     // Use nodeFromTree to ensure command is set properly
                     const refNode = this.nodeFromTree(refTreeData, false);
@@ -1263,6 +1623,30 @@ class NixUpstreamTreeProvider {
             tooltip = `Reference at:\n${tree.file}:${tree.line + 1}:${tree.character + 1}`;
             collapsibleState = vscode.TreeItemCollapsibleState.None;
         }
+        else if (tree.isClass) {
+            // Class node - use lowercase 'c' indicator
+            label = `c ${tree.name}`;
+            // For root nodes, add the stats
+            if (isRoot) {
+                const stats = this.countTreeStats(tree);
+                // For class nodes, show methods that use the class
+                const methodCount = stats.methods;
+                if (methodCount > 0 || stats.refs > 0) {
+                    label += ` (${stats.refs} ref${stats.refs !== 1 ? 's' : ''} in ${methodCount} method${methodCount !== 1 ? 's' : ''})`;
+                }
+            }
+            tooltip = tree.namespace ? `${tree.namespace}\n${tree.file ? tree.file : ''}:${tree.line !== undefined ? tree.line + 1 : ''}` : '';
+            // Node is expandable if it has children OR reference locations
+            const hasChildren = tree.children && tree.children.length > 0;
+            const hasReferences = tree.referenceLocations && tree.referenceLocations.length > 0;
+            // Default to EXPANDED for all nodes that have children
+            if (hasChildren || hasReferences) {
+                collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
+            }
+            else {
+                collapsibleState = vscode.TreeItemCollapsibleState.None;
+            }
+        }
         else {
             // Method node - determine type indicator
             const isInterface = tree.file && tree.file.toLowerCase().includes('interface');
@@ -1312,7 +1696,13 @@ class NixUpstreamNode extends vscode.TreeItem {
         this.treeData = treeData;
         // Only set context value and checkbox for actual data nodes (not info messages)
         if (treeData) {
-            this.contextValue = 'nixUpstreamNode';
+            // Set different context values for reference nodes vs method/class nodes
+            if (treeData.isReference) {
+                this.contextValue = 'nixUpstreamReference';
+            }
+            else {
+                this.contextValue = 'nixUpstreamNode';
+            }
             // Set checkbox state using the proper VSCode API
             this.checkboxState = checked
                 ? vscode.TreeItemCheckboxState.Checked

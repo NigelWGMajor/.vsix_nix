@@ -2,7 +2,7 @@
   "name": "nix-upstream-check",
   "displayName": "Nix Upstream Check",
   "description": "Find all upstream references to a C# function and display the call tree.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "NigelWGMajor",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -62,8 +62,8 @@
       },
       {
         "command": "nixUpstreamCheck.exportMarkdown",
-        "title": "Export as Markdown",
-        "icon": "$(markdown)"
+        "title": "Copy as Markdown",
+        "icon": "$(clippy)"
       },
       {
         "command": "nixUpstreamCheck.pruneUnchecked",
@@ -83,6 +83,11 @@
         "command": "nixUpstreamCheck.addCurrentLine",
         "title": "Add Current Line",
         "icon": "$(add)"
+      },
+      {
+        "command": "nixUpstreamCheck.removeNode",
+        "title": "Remove from Tree",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -95,14 +100,19 @@
       ],
       "view/item/context": [
         {
+          "command": "nixUpstreamCheck.removeNode",
+          "when": "view == nixUpstreamCheckTree && (viewItem == nixUpstreamNode || viewItem == nixUpstreamReference)",
+          "group": "1_actions@1"
+        },
+        {
           "command": "nixUpstreamCheck.exhaustiveSearch",
-          "when": "view == nixUpstreamCheckTree && viewItem == nixUpstreamNode",
-          "group": "inline"
+          "when": "view == nixUpstreamCheckTree && (viewItem == nixUpstreamNode || viewItem == nixUpstreamReference)",
+          "group": "1_actions@2"
         },
         {
           "command": "nixUpstreamCheck.searchUpstreamFromReference",
-          "when": "view == nixUpstreamCheckTree && viewItem == nixUpstreamReference",
-          "group": "navigation"
+          "when": "view == nixUpstreamCheckTree && (viewItem == nixUpstreamNode || viewItem == nixUpstreamReference)",
+          "group": "1_actions@3"
         }
       ],
       "view/title": [

@@ -334,10 +334,10 @@ export function activate(context: vscode.ExtensionContext) {
 
             outputChannel.appendLine(`Found ${references.length} references to analyze`);
 
-            // Analyze each reference to determine type (N = new, P = parameter)
+            // Analyze each reference to determine type (N = new, P = parameter, I = interface)
             const categorizedRefs: Array<{
                 location: vscode.Location;
-                type: 'N' | 'P' | 'other';
+                type: 'N' | 'P' | 'I' | 'other';
                 enclosingMethod?: string;
                 enclosingMethodLocation?: { line: number; character: number; };
             }> = [];
@@ -390,6 +390,21 @@ export function activate(context: vscode.ExtensionContext) {
                     continue;
                 }
 
+                // Check if it's in an interface signature
+                const isInterfaceSignature = isClassUsedInInterfaceSignature(refDoc, ref.range.start.line, className);
+                if (isInterfaceSignature) {
+                    const enclosingInfo = findEnclosingMethod(refDoc, ref.range.start.line);
+                    if (enclosingInfo) { // Only add if we found an enclosing method
+                        categorizedRefs.push({
+                            location: ref,
+                            type: 'I',
+                            enclosingMethod: enclosingInfo.name,
+                            enclosingMethodLocation: enclosingInfo.location
+                        });
+                    }
+                    continue;
+                }
+
                 // Check if it's a parameter (inside method signature before opening brace)
                 const isParameter = isClassUsedAsParameter(refDoc, ref.range.start.line, className);
                 if (isParameter) {
@@ -411,18 +426,20 @@ export function activate(context: vscode.ExtensionContext) {
 
             const nCount = categorizedRefs.filter(r => r.type === 'N').length;
             const pCount = categorizedRefs.filter(r => r.type === 'P').length;
+            const iCount = categorizedRefs.filter(r => r.type === 'I').length;
 
             outputChannel.appendLine(`\nCategorized references:`);
             outputChannel.appendLine(`  [N] New/Instantiation: ${nCount}`);
             outputChannel.appendLine(`  [P] Parameter: ${pCount}`);
+            outputChannel.appendLine(`  [I] Interface: ${iCount}`);
             outputChannel.appendLine(`  Total relevant: ${categorizedRefs.length}`);
 
             if (categorizedRefs.length === 0) {
-                vscode.window.showInformationMessage(`No [N]ew or [P]arameter references found for ${className}`);
+                vscode.window.showInformationMessage(`No [N]ew, [P]arameter, or [I]nterface references found for ${className}`);
                 return;
             }
 
-            progress.report({ message: `Found ${nCount} [N] and ${pCount} [P] refs` });
+            progress.report({ message: `Found ${nCount} [N], ${pCount} [P], ${iCount} [I] refs` });
 
             // Group by enclosing method and build trees
             const methodGroups = new Map<string, typeof categorizedRefs>();
@@ -522,6 +539,62 @@ export function activate(context: vscode.ExtensionContext) {
         // Check if className appears between '(' and ')' in the signature
         const paramPattern = new RegExp(`\\(([^)]*\\b${className}\\b[^)]*)\\)`);
         return paramPattern.test(signatureText);
+    }
+
+    // Helper: Check if class is used in an interface method signature
+    function isClassUsedInInterfaceSignature(doc: vscode.TextDocument, lineNumber: number, className: string): boolean {
+        // Search backwards to find if we're inside an interface definition
+        let inInterface = false;
+        let interfaceStartLine = -1;
+
+        for (let i = lineNumber; i >= Math.max(0, lineNumber - 50); i--) {
+            const lineText = doc.lineAt(i).text.trim();
+
+            // If we hit a class definition, we're not in an interface
+            if (/\bclass\s+\w+/.test(lineText)) {
+                return false;
+            }
+
+            // Check if we found an interface definition
+            if (/\binterface\s+\w+/.test(lineText)) {
+                inInterface = true;
+                interfaceStartLine = i;
+                break;
+            }
+        }
+
+        // If not in an interface, return false
+        if (!inInterface) {
+            return false;
+        }
+
+        // Now check if the className appears in a method signature within the interface
+        // Look at current line and potentially previous lines to find method signature
+        let signatureText = '';
+        let foundMethodStart = false;
+
+        for (let i = lineNumber; i >= Math.max(interfaceStartLine, lineNumber - 5); i--) {
+            const lineText = doc.lineAt(i).text;
+            signatureText = lineText + ' ' + signatureText;
+
+            // Check if we've found a method definition (interface methods don't need access modifiers)
+            if (methodRegexNoKeywordsPermissive.test(lineText) || methodRegexWithKeywords.test(lineText)) {
+                foundMethodStart = true;
+                break;
+            }
+
+            // If we hit an opening brace or semicolon, stop looking
+            if (lineText.includes('{') || lineText.includes(';')) {
+                break;
+            }
+        }
+
+        // If we found a method signature and className appears in it (as parameter or return type)
+        if (foundMethodStart && signatureText.includes(className)) {
+            return true;
+        }
+
+        return false;
     }
 
     // Helper: Find enclosing method for a given line
@@ -878,11 +951,35 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const treeData = node.treeData;
-        const methodName = treeData.name;
-        const namespaceName = treeData.namespace || '';
-        const file = treeData.file;
-        const line = treeData.line;
-        const character = treeData.character || 0;
+        let methodName = treeData.name;
+        let namespaceName = treeData.namespace || '';
+        let file = treeData.file;
+        let line = treeData.line;
+        let character = treeData.character || 0;
+
+        // If this is a reference node, find the enclosing method
+        if (treeData.isReference) {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+            const enclosingInfo = findEnclosingMethod(doc, line);
+
+            if (!enclosingInfo) {
+                vscode.window.showWarningMessage('Could not find enclosing method for this reference');
+                return;
+            }
+
+            methodName = enclosingInfo.name;
+            line = enclosingInfo.location.line;
+            character = enclosingInfo.location.character;
+
+            // Find namespace for the enclosing method
+            for (let i = line; i >= 0; i--) {
+                const ns = doc.lineAt(i).text.match(/namespace\s+([\w\.]+)/);
+                if (ns) {
+                    namespaceName = ns[1];
+                    break;
+                }
+            }
+        }
 
         if (!file || typeof line !== 'number') {
             vscode.window.showWarningMessage('Invalid node data for exhaustive search');
@@ -927,38 +1024,76 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(exhaustiveSearchCommand);
 
-    // Register command to search upstream from a reference location
+    // Register command to search upstream from any node location
     let searchUpstreamFromReferenceCommand = vscode.commands.registerCommand('nixUpstreamCheck.searchUpstreamFromReference', async (node: NixUpstreamNode) => {
-        if (!node || !node.treeData || !node.treeData.isReference) {
-            vscode.window.showWarningMessage('This command only works on reference locations');
+        if (!node || !node.treeData) {
+            vscode.window.showWarningMessage('No node selected');
             return;
         }
 
-        const refData = node.treeData;
-        const file = refData.file;
-        const line = refData.line;
-        const character = refData.character || 0;
+        const nodeData = node.treeData;
+        const file = nodeData.file;
+        const line = nodeData.line;
+        const character = nodeData.character || 0;
 
         if (!file || typeof line !== 'number') {
-            vscode.window.showWarningMessage('Invalid reference location data');
+            vscode.window.showWarningMessage('Invalid node location data');
             return;
         }
 
         // Open the document to find the enclosing method
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
 
-        // Find the enclosing method by searching upwards
+        // Find the method to search from
         let methodDef: { name: string; namespace: string; line: number; character: number; } | null = null;
 
-        for (let j = line; j >= 0; j--) {
-            const lineText = doc.lineAt(j).text;
+        // If this is a reference node, find the enclosing method
+        // If it's already a method node, use its data directly
+        if (nodeData.isReference) {
+            // Find the enclosing method by searching upwards
+            for (let j = line; j >= 0; j--) {
+                const lineText = doc.lineAt(j).text;
 
-            // Check if it's a method definition
-            if (isNonMethodCode(lineText)) {
-                continue;
+                // Check if it's a method definition
+                if (isNonMethodCode(lineText)) {
+                    continue;
+                }
+
+                // Try both patterns (with keywords and without)
+                let m = lineText.match(methodRegexWithKeywords);
+                if (!m) {
+                    m = lineText.match(methodRegexNoKeywordsPermissive);
+                }
+
+                if (m) {
+                    const methodName = m[2];
+                    const methodNameIndex = lineText.indexOf(methodName);
+
+                    // Find namespace for this method
+                    let namespace = '';
+                    for (let k = j; k >= 0; k--) {
+                        const ns = doc.lineAt(k).text.match(/namespace\s+([\w\.]+)/);
+                        if (ns) {
+                            namespace = ns[1];
+                            break;
+                        }
+                    }
+
+                    methodDef = {
+                        name: methodName,
+                        namespace: namespace,
+                        line: j,
+                        character: methodNameIndex >= 0 ? methodNameIndex : 0
+                    };
+                    break;
+                }
             }
+        } else {
+            // This is a method/class node, need to parse the actual method name from the file
+            // (nodeData.name contains the formatted display name with type indicators)
+            const lineText = doc.lineAt(line).text;
 
-            // Try both patterns (with keywords and without)
+            // Try to extract the actual method name from the line
             let m = lineText.match(methodRegexWithKeywords);
             if (!m) {
                 m = lineText.match(methodRegexNoKeywordsPermissive);
@@ -968,36 +1103,40 @@ export function activate(context: vscode.ExtensionContext) {
                 const methodName = m[2];
                 const methodNameIndex = lineText.indexOf(methodName);
 
-                // Find namespace for this method
-                let namespace = '';
-                for (let k = j; k >= 0; k--) {
-                    const ns = doc.lineAt(k).text.match(/namespace\s+([\w\.]+)/);
-                    if (ns) {
-                        namespace = ns[1];
-                        break;
-                    }
-                }
-
                 methodDef = {
                     name: methodName,
-                    namespace: namespace,
-                    line: j,
-                    character: methodNameIndex >= 0 ? methodNameIndex : 0
+                    namespace: nodeData.namespace || '',
+                    line: line,
+                    character: methodNameIndex >= 0 ? methodNameIndex : character
                 };
-                break;
+            } else {
+                // Fallback: try to extract from nodeData.name by removing type indicators
+                // Remove bold unicode characters and extra formatting
+                let cleanName = nodeData.name.replace(/^[𝐌𝐂𝐒𝐎𝐈𝐍𝐏c]\s+/, '');
+                // Remove HTTP attributes
+                cleanName = cleanName.replace(/\s*\[Http.*?\].*$/, '');
+                // Remove stats in parentheses at the end
+                cleanName = cleanName.replace(/\s*\(.*\)$/, '');
+
+                methodDef = {
+                    name: cleanName.trim(),
+                    namespace: nodeData.namespace || '',
+                    line: line,
+                    character: character
+                };
             }
         }
 
         if (!methodDef) {
-            vscode.window.showWarningMessage('Could not find enclosing method for this reference');
+            vscode.window.showWarningMessage('Could not find method for upstream search');
             return;
         }
 
-        // Now start the upstream search from the enclosing method
+        // Now start the upstream search from the method
         outputChannel.clear();
-        outputChannel.appendLine('=== Upstream Search from Reference Location ===');
-        outputChannel.appendLine(`Reference: ${file}:${line + 1}`);
-        outputChannel.appendLine(`Enclosing Method: ${methodDef.name}`);
+        outputChannel.appendLine('=== Upstream Search from Selected Node ===');
+        outputChannel.appendLine(`Source: ${file}:${line + 1}`);
+        outputChannel.appendLine(`Method: ${methodDef.name}`);
         outputChannel.appendLine(`Namespace: ${methodDef.namespace}`);
         outputChannel.appendLine('');
         outputChannel.show(true);
@@ -1156,7 +1295,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(exportJsonCommand);
 
-    // Register command to export tree as Markdown
+    // Register command to export tree as Markdown (copy to clipboard)
     let exportMarkdownCommand = vscode.commands.registerCommand('nixUpstreamCheck.exportMarkdown', async () => {
         const trees = treeDataProvider.getCallTrees();
         if (trees.length === 0) {
@@ -1173,23 +1312,9 @@ export function activate(context: vscode.ExtensionContext) {
             markdown += `\n---\n\n`;
         });
 
-        // Use the first tree's root member name as default filename
-        const firstTree = trees[0];
-        const defaultName = firstTree.name ? `${firstTree.name}.md` : 'upstream-references.md';
-
-        const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(defaultName),
-            filters: { 'Markdown': ['md'] }
-        });
-
-        if (uri) {
-            const bytes = new Uint8Array(markdown.length);
-            for (let i = 0; i < markdown.length; i++) {
-                bytes[i] = markdown.charCodeAt(i);
-            }
-            await vscode.workspace.fs.writeFile(uri, bytes);
-            vscode.window.showInformationMessage(`Tree exported to ${uri.fsPath}`);
-        }
+        // Copy markdown to clipboard
+        await vscode.env.clipboard.writeText(markdown);
+        vscode.window.showInformationMessage('Markdown copied to clipboard!');
     });
     context.subscriptions.push(exportMarkdownCommand);
 
@@ -1198,11 +1323,18 @@ export function activate(context: vscode.ExtensionContext) {
         // If URI is provided (from file explorer click), use it; otherwise show file picker
         let fileUri = uri;
         if (!fileUri) {
+            // Get workspace folder as default directory
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            const defaultUri = workspaceFolders && workspaceFolders.length > 0
+                ? workspaceFolders[0].uri
+                : undefined;
+
             const result = await vscode.window.showOpenDialog({
                 canSelectFiles: true,
                 canSelectFolders: false,
                 canSelectMany: false,
-                filters: { 'Upstream JSON': ['upstream.json'], 'All Files': ['*'] }
+                filters: { 'Upstream JSON': ['upstream.json'], 'All Files': ['*'] },
+                defaultUri: defaultUri
             });
             if (result && result.length > 0) {
                 fileUri = result[0];
@@ -1316,11 +1448,59 @@ export function activate(context: vscode.ExtensionContext) {
             referenceLocations: []
         };
 
+        // Check if this item already exists
+        const existingTree = treeDataProvider.findExistingTree(document.uri.fsPath, position.line);
+        if (existingTree) {
+            // Item already exists, reveal it in the tree
+            const existingNode = treeDataProvider.findNodeByFileAndLine(document.uri.fsPath, position.line);
+            if (existingNode) {
+                treeView.reveal(existingNode, { select: true, focus: true, expand: false });
+                vscode.window.showInformationMessage(`"${itemName}" is already in the tree (selected).`);
+            } else {
+                vscode.window.showInformationMessage(`"${itemName}" is already in the tree.`);
+            }
+            return;
+        }
+
         // Add to tree
-        treeDataProvider.addCallTree(simpleItem);
-        vscode.window.showInformationMessage(`Added "${itemName}" to tree.`);
+        const wasAdded = treeDataProvider.addCallTree(simpleItem);
+        if (wasAdded) {
+            vscode.window.showInformationMessage(`Added "${itemName}" to tree.`);
+        } else {
+            vscode.window.showWarningMessage(`"${itemName}" could not be added (may already exist).`);
+        }
     });
     context.subscriptions.push(addCurrentLineCommand);
+
+    // Command to remove a node from the tree
+    let removeNodeCommand = vscode.commands.registerCommand('nixUpstreamCheck.removeNode', async (node: NixUpstreamNode) => {
+        if (!node || !node.treeData) {
+            vscode.window.showWarningMessage('No node selected.');
+            return;
+        }
+
+        const itemName = node.treeData.name || 'item';
+
+        // Confirm deletion
+        const answer = await vscode.window.showWarningMessage(
+            `Remove "${itemName}" from the tree?`,
+            { modal: true },
+            'Remove'
+        );
+
+        if (answer !== 'Remove') {
+            return;
+        }
+
+        // Find and remove the tree that matches this node
+        const removed = treeDataProvider.removeCallTree(node.treeData);
+        if (removed) {
+            vscode.window.showInformationMessage(`Removed "${itemName}" from tree.`);
+        } else {
+            vscode.window.showWarningMessage(`Could not remove "${itemName}".`);
+        }
+    });
+    context.subscriptions.push(removeNodeCommand);
 }
 
 export function deactivate() {}
@@ -1341,10 +1521,22 @@ export function deactivate() {}
             this._onDidChangeTreeData.fire();
         }
 
-        addCallTree(tree: any) {
+        addCallTree(tree: any): boolean {
+            // Check for duplicates using the same key logic
+            const newKey = this.getNodeKey(tree);
+            const isDuplicate = this.callTrees.some(existingTree => {
+                const existingKey = this.getNodeKey(existingTree);
+                return existingKey === newKey;
+            });
+
+            if (isDuplicate) {
+                return false; // Don't add duplicate
+            }
+
             this.callTrees.push(tree);
             this.rootNodes = []; // Will be rebuilt
             this._onDidChangeTreeData.fire();
+            return true; // Successfully added
         }
 
         replaceLastTree(tree: any) {
@@ -1686,6 +1878,92 @@ export function deactivate() {}
             return this.callTrees;
         }
 
+        // Find an existing tree by file and line
+        findExistingTree(file: string, line: number): any | undefined {
+            return this.callTrees.find(tree => {
+                return tree.file === file && tree.line === line;
+            });
+        }
+
+        // Find a node in the tree by file and line (returns the UI node)
+        findNodeByFileAndLine(file: string, line: number): NixUpstreamNode | undefined {
+            // First check root nodes
+            for (const rootNode of this.rootNodes) {
+                if (rootNode.treeData &&
+                    rootNode.treeData.file === file &&
+                    rootNode.treeData.line === line) {
+                    return rootNode;
+                }
+            }
+            return undefined;
+        }
+
+        // Remove a node from the tree (works for root trees, child nodes, and references)
+        removeCallTree(treeData: any): boolean {
+            // Try to remove as a root tree first
+            const rootIndex = this.callTrees.indexOf(treeData);
+            if (rootIndex > -1) {
+                this.callTrees.splice(rootIndex, 1);
+                this.rootNodes = []; // Will be rebuilt
+                this._onDidChangeTreeData.fire();
+                return true;
+            }
+
+            // If not a root, search through all trees to find and remove this node
+            const removeFromTree = (tree: any): boolean => {
+                // Check if this node has children
+                if (tree.children && tree.children.length > 0) {
+                    const childIndex = tree.children.indexOf(treeData);
+                    if (childIndex > -1) {
+                        tree.children.splice(childIndex, 1);
+                        return true;
+                    }
+
+                    // Recursively search children
+                    for (const child of tree.children) {
+                        if (removeFromTree(child)) {
+                            return true;
+                        }
+                    }
+                }
+
+                // Check if this node has reference locations
+                if (tree.referenceLocations && tree.referenceLocations.length > 0) {
+                    const refIndex = tree.referenceLocations.indexOf(treeData);
+                    if (refIndex > -1) {
+                        tree.referenceLocations.splice(refIndex, 1);
+                        return true;
+                    }
+
+                    // For reference nodes, we need to match by file and line
+                    if (treeData.isReference) {
+                        const matchingRefIndex = tree.referenceLocations.findIndex((ref: any) =>
+                            ref.file === treeData.file &&
+                            ref.line === treeData.line &&
+                            ref.character === treeData.character
+                        );
+                        if (matchingRefIndex > -1) {
+                            tree.referenceLocations.splice(matchingRefIndex, 1);
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            };
+
+            // Search through all root trees
+            for (const rootTree of this.callTrees) {
+                if (removeFromTree(rootTree)) {
+                    this.rootNodes = []; // Will be rebuilt
+                    this._onDidChangeTreeData.fire();
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         // Serialize tree with checkbox states for JSON export
         serializeTreeWithCheckboxes(tree: any): any {
             const checked = this.getCheckboxState(tree);
@@ -1836,8 +2114,15 @@ export function deactivate() {}
                 if (treeData.referenceLocations && treeData.referenceLocations.length > 0) {
                     for (const refLoc of treeData.referenceLocations) {
                         const fileName = refLoc.file.split(/[/\\]/).pop() || refLoc.file;
-                        // Add reference type indicator if available (N or P for class references)
-                        const refTypePrefix = refLoc.referenceType ? `[${refLoc.referenceType}] ` : '';
+                        // Add reference type indicator if available (N or P for class references, I for interfaces)
+                        let refTypePrefix = '';
+                        if (refLoc.referenceType === 'N') {
+                            refTypePrefix = '𝐍 ';  // Bold N for new/instantiation
+                        } else if (refLoc.referenceType === 'P') {
+                            refTypePrefix = '𝐏 ';  // Bold P for parameter
+                        } else if (refLoc.referenceType === 'I') {
+                            refTypePrefix = '𝐈 ';  // Bold I for interface
+                        }
                         const label = `${refTypePrefix}📍 ${fileName}:${refLoc.line + 1}`;
                         // Create a tree data object for the reference location
                         const refTreeData = {
@@ -1963,8 +2248,20 @@ export function deactivate() {}
                 }
             }
 
-            // Use stored checkbox state if available
-            const isChecked = this.getCheckboxState(tree);
+            // Check if this node already has a stored checkbox state
+            const nodeKey = this.getNodeKey(tree);
+            const hasStoredState = this.checkedStates.has(nodeKey);
+
+            // If no stored state exists, default to checked; otherwise use stored state
+            let isChecked: boolean;
+            if (hasStoredState) {
+                isChecked = this.checkedStates.get(nodeKey)!;
+            } else {
+                // New items default to checked
+                isChecked = true;
+                this.checkedStates.set(nodeKey, true);
+            }
+
             const node = new NixUpstreamNode(label, tooltip, isChecked, tree, collapsibleState);
 
             // Make all nodes with file location clickable

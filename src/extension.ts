@@ -765,7 +765,7 @@ export function activate(context: vscode.ExtensionContext) {
             const doc = await vscode.workspace.openTextDocument(ref.uri);
             const refLine = doc.lineAt(ref.range.start.line).text;
 
-            // FILTER: Only process actual method CALLS, not declarations or other references
+            // FILTER: Only process actual method CALLS or related method definitions, not other references
             // Check if this line contains a method call pattern: methodName(
             const methodCallPattern = new RegExp(`\\b${methodName}\\s*\\(`);
             if (!methodCallPattern.test(refLine)) {
@@ -773,17 +773,59 @@ export function activate(context: vscode.ExtensionContext) {
                 continue;
             }
 
-            // Also skip method definitions (the reference shouldn't be defining the method)
-            if (methodRegexWithKeywords.test(refLine) || methodRegexNoKeywordsPermissive.test(refLine)) {
-                // This looks like a method signature line, not a call
-                continue;
+            // Check if this is a method definition
+            const isDefinitionLine = methodRegexWithKeywords.test(refLine) || methodRegexNoKeywordsPermissive.test(refLine);
+
+            // Skip method definitions EXCEPT the one we started from (we want to see interface/implementation siblings)
+            // If it's the same file and line we started from, skip it (that's our starting point)
+            // Otherwise, if it's a definition, we'll process it as a sibling (interface or implementation)
+            if (isDefinitionLine) {
+                // Skip the exact line we're searching from
+                if (ref.uri.fsPath === documentUri.fsPath && ref.range.start.line === position.line) {
+                    continue;
+                }
+                // For other definitions, we want to show them as siblings (interface/implementation)
+                // We'll process them differently below
             }
 
             let methodDef: MethodDef | null = null;
 
-            // Find the enclosing method by searching upwards from the reference
-            for (let j = ref.range.start.line; j >= 0; j--) {
-                const line = doc.lineAt(j).text;
+            // If this is a definition line (interface or implementation), parse it directly
+            if (isDefinitionLine) {
+                // Parse the method name from the definition itself
+                let match = refLine.match(methodRegexWithKeywords);
+                if (!match) {
+                    match = refLine.match(methodRegexNoKeywordsPermissive);
+                }
+
+                if (match) {
+                    // For methodRegexWithKeywords: method name is in match[2]
+                    // For methodRegexNoKeywordsPermissive: method name is in match[3]
+                    const extractedMethodName = match.length > 3 && match[3] ? match[3] : match[2];
+
+                    // Find namespace
+                    let namespace = '';
+                    for (let k = ref.range.start.line; k >= 0; k--) {
+                        const ns = doc.lineAt(k).text.match(/namespace\s+([\w\.]+)/);
+                        if (ns) {
+                            namespace = ns[1];
+                            break;
+                        }
+                    }
+
+                    methodDef = {
+                        name: extractedMethodName,
+                        namespace: namespace,
+                        file: ref.uri.fsPath,
+                        line: ref.range.start.line,
+                        character: refLine.indexOf(extractedMethodName),
+                        referenceLocations: []
+                    };
+                }
+            } else {
+                // Find the enclosing method by searching upwards from the reference
+                for (let j = ref.range.start.line; j >= 0; j--) {
+                    const line = doc.lineAt(j).text;
 
                 // Check if it's a method definition (use permissive patterns for method upstream search)
                 if (isNonMethodCode(line)) {
@@ -820,6 +862,7 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     break;
                 }
+            }
             }
 
             if (methodDef) {
@@ -1325,16 +1368,19 @@ export function activate(context: vscode.ExtensionContext) {
         if (!fileUri) {
             // Get workspace folder as default directory
             const workspaceFolders = vscode.workspace.workspaceFolders;
-            const defaultUri = workspaceFolders && workspaceFolders.length > 0
-                ? workspaceFolders[0].uri
-                : undefined;
+            let defaultUri: vscode.Uri | undefined;
+
+            if (workspaceFolders && workspaceFolders.length > 0) {
+                defaultUri = workspaceFolders[0].uri;
+            }
 
             const result = await vscode.window.showOpenDialog({
                 canSelectFiles: true,
                 canSelectFolders: false,
                 canSelectMany: false,
                 filters: { 'Upstream JSON': ['upstream.json'], 'All Files': ['*'] },
-                defaultUri: defaultUri
+                defaultUri: defaultUri,
+                openLabel: 'Import'
             });
             if (result && result.length > 0) {
                 fileUri = result[0];
@@ -1346,6 +1392,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         try {
+            // Ensure the URI has a valid scheme
+            if (!fileUri.scheme || fileUri.scheme === '') {
+                vscode.window.showErrorMessage('Invalid file path selected.');
+                return;
+            }
+
             const fileContent = await vscode.workspace.fs.readFile(fileUri);
             // Convert Uint8Array to string
             let jsonContent = '';
@@ -2219,8 +2271,36 @@ export function deactivate() {}
                 }
             } else {
                 // Method node - determine type indicator
-                const isInterface = tree.file && tree.file.toLowerCase().includes('interface');
-                const typeIndicator = this.getTypeIndicator(tree.file || '', isInterface);
+                let isInterfaceMethod = false;
+
+                // Check if this method is in an interface by examining the source
+                if (tree.file && typeof tree.line === 'number') {
+                    try {
+                        const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === tree.file);
+                        if (doc) {
+                            // Search backwards from the method line to find interface or class
+                            for (let i = tree.line; i >= Math.max(0, tree.line - 50); i--) {
+                                const lineText = doc.lineAt(i).text.trim();
+                                if (/\bclass\s+\w+/.test(lineText)) {
+                                    // Hit a class first, not an interface
+                                    break;
+                                }
+                                if (/\binterface\s+\w+/.test(lineText)) {
+                                    isInterfaceMethod = true;
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // If we can't check, fall back to filename check
+                        isInterfaceMethod = tree.file.toLowerCase().includes('interface');
+                    }
+                }
+
+                const baseTypeIndicator = this.getTypeIndicator(tree.file || '', false);
+
+                // If it's an interface method, prepend 𝐈 to whatever type indicator it has
+                const typeIndicator = isInterfaceMethod ? `𝐈${baseTypeIndicator}` : baseTypeIndicator;
 
                 // Add type indicator before the method name (no brackets, using bold unicode)
                 label = `${typeIndicator} ${tree.name}${tree.httpAttribute ? ` [${tree.httpAttribute}]` : ''}`;

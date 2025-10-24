@@ -253,7 +253,8 @@ function activate(context) {
     async function manualReferenceSearch(methodName, documentUri, position) {
         const files = await vscode.workspace.findFiles('**/*.cs', '**/obj/**');
         const references = [];
-        const callRegex = new RegExp(`\\b${methodName}\\s*\\(`);
+        // Allow for optional generic type parameters before the opening paren
+        const callRegex = new RegExp(`\\b${methodName}\\s*(<[^>]+>)?\\s*\\(`);
         for (const file of files) {
             const doc = await vscode.workspace.openTextDocument(file);
             for (let i = 0; i < doc.lineCount; i++) {
@@ -645,7 +646,9 @@ function activate(context) {
             const refLine = doc.lineAt(ref.range.start.line).text;
             // FILTER: Only process actual method CALLS or related method definitions, not other references
             // Check if this line contains a method call pattern: methodName(
-            const methodCallPattern = new RegExp(`\\b${methodName}\\s*\\(`);
+            // Pattern matches: methodName followed by optional generic type args, then opening paren
+            // This handles: Method(), Method<T>(), (await Method()), obj.Method(), etc.
+            const methodCallPattern = new RegExp(`\\b${methodName}\\s*(<[^>]+>)?\\s*\\(`);
             if (!methodCallPattern.test(refLine)) {
                 // Skip references that aren't method calls (e.g., variable declarations, return types, etc.)
                 continue;
@@ -743,11 +746,21 @@ function activate(context) {
                 if (processedMethods.has(methodKey)) {
                     // Add this reference location to the existing method
                     const existingMethod = processedMethods.get(methodKey);
-                    existingMethod.referenceLocations.push(refLocation);
+                    // Don't add if the reference is the method definition itself (avoids redundant pushpin)
+                    const isDefinitionItself = refLocation.file === existingMethod.file &&
+                        refLocation.line === existingMethod.line;
+                    if (!isDefinitionItself) {
+                        existingMethod.referenceLocations.push(refLocation);
+                    }
                     continue;
                 }
-                // First time seeing this method - add the reference location
-                methodDef.referenceLocations.push(refLocation);
+                // First time seeing this method
+                // Don't add the reference location if it's the definition itself (avoids redundant pushpin)
+                const isDefinitionItself = refLocation.file === methodDef.file &&
+                    refLocation.line === methodDef.line;
+                if (!isDefinitionItself) {
+                    methodDef.referenceLocations.push(refLocation);
+                }
                 processedMethods.set(methodKey, methodDef);
             }
         }

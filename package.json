@@ -88,6 +88,18 @@
         "command": "nixUpstreamCheck.removeNode",
         "title": "Remove from Tree",
         "icon": "$(trash)"
+      },
+      {
+        "command": "nixUpstreamCheck.addCommentAbove",
+        "title": "Add Comment Above"
+      },
+      {
+        "command": "nixUpstreamCheck.editComment",
+        "title": "Edit Comment"
+      },
+      {
+        "command": "nixUpstreamCheck.deleteComment",
+        "title": "Delete Comment"
       }
     ],
     "menus": {
@@ -99,6 +111,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "nixUpstreamCheck.addCommentAbove",
+          "when": "view == nixUpstreamCheckTree && (viewItem == nixUpstreamNode || viewItem == nixUpstreamReference)",
+          "group": "0_comment@1"
+        },
         {
           "command": "nixUpstreamCheck.removeNode",
           "when": "view == nixUpstreamCheckTree && (viewItem == nixUpstreamNode || viewItem == nixUpstreamReference)",
@@ -113,6 +130,16 @@
           "command": "nixUpstreamCheck.searchUpstreamFromReference",
           "when": "view == nixUpstreamCheckTree && (viewItem == nixUpstreamNode || viewItem == nixUpstreamReference)",
           "group": "1_actions@3"
+        },
+        {
+          "command": "nixUpstreamCheck.editComment",
+          "when": "view == nixUpstreamCheckTree && viewItem == nixUpstreamComment",
+          "group": "2_comment@1"
+        },
+        {
+          "command": "nixUpstreamCheck.deleteComment",
+          "when": "view == nixUpstreamCheckTree && viewItem == nixUpstreamComment",
+          "group": "2_comment@2"
         }
       ],
       "view/title": [

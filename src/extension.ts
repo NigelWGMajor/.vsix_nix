@@ -1317,6 +1317,59 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(clearTreeCommand);
 
+    // Register command to add comment above a node
+    let addCommentAboveCommand = vscode.commands.registerCommand('nixUpstreamCheck.addCommentAbove', async (node: NixUpstreamNode) => {
+        const comment = await vscode.window.showInputBox({
+            prompt: 'Enter comment',
+            placeHolder: 'Type your comment here...',
+            validateInput: (value) => {
+                return value.trim() ? null : 'Comment cannot be empty';
+            }
+        });
+
+        if (comment) {
+            const success = treeDataProvider.insertCommentAbove(node, comment.trim());
+            if (!success) {
+                vscode.window.showErrorMessage('Failed to add comment. Please try again.');
+            }
+        }
+    });
+    context.subscriptions.push(addCommentAboveCommand);
+
+    // Register command to edit a comment node
+    let editCommentCommand = vscode.commands.registerCommand('nixUpstreamCheck.editComment', async (node: NixUpstreamNode) => {
+        const currentComment = node.treeData?.commentText || '';
+        const newComment = await vscode.window.showInputBox({
+            prompt: 'Edit comment',
+            value: currentComment,
+            validateInput: (value) => {
+                return value.trim() ? null : 'Comment cannot be empty';
+            }
+        });
+
+        if (newComment && newComment.trim() !== currentComment) {
+            treeDataProvider.editComment(node, newComment.trim());
+        }
+    });
+    context.subscriptions.push(editCommentCommand);
+
+    // Register command to delete a comment node
+    let deleteCommentCommand = vscode.commands.registerCommand('nixUpstreamCheck.deleteComment', async (node: NixUpstreamNode) => {
+        const result = await vscode.window.showWarningMessage(
+            'Delete this comment?',
+            { modal: true },
+            'Delete'
+        );
+
+        if (result === 'Delete') {
+            const success = treeDataProvider.deleteComment(node);
+            if (!success) {
+                vscode.window.showErrorMessage('Failed to delete comment. Please try again.');
+            }
+        }
+    });
+    context.subscriptions.push(deleteCommentCommand);
+
     // Register command to export tree as JSON
     let exportJsonCommand = vscode.commands.registerCommand('nixUpstreamCheck.exportJson', async () => {
         const trees = treeDataProvider.getCallTrees();
@@ -1618,6 +1671,114 @@ export function deactivate() {}
             this.nodeParentMap.clear();
             this.checkedStates.clear();
             this._onDidChangeTreeData.fire();
+        }
+
+        // Insert a comment node above the specified node
+        insertCommentAbove(node: NixUpstreamNode, commentText: string): boolean {
+            // Create comment tree data
+            const commentTreeData = {
+                isComment: true,
+                commentText: commentText,
+                name: commentText
+            };
+
+            // Find parent of the node
+            const parent = this.nodeParentMap.get(node);
+
+            if (!parent) {
+                // Node is at root level
+                const nodeIndex = this.callTrees.findIndex(tree => tree === node.treeData);
+                if (nodeIndex >= 0) {
+                    this.callTrees.splice(nodeIndex, 0, commentTreeData);
+                    this.rootNodes = []; // Will be rebuilt
+                    this._onDidChangeTreeData.fire();
+                    return true;
+                }
+            } else {
+                // Node has a parent - insert into parent's children array
+                const parentTreeData = parent.treeData;
+
+                // Check if we need to insert into referenceLocations or children
+                if (node.treeData.isReference && parentTreeData.referenceLocations) {
+                    // Find the reference in parent's referenceLocations
+                    const refIndex = parentTreeData.referenceLocations.findIndex((ref: any) =>
+                        ref.file === node.treeData.file &&
+                        ref.line === node.treeData.line &&
+                        ref.character === node.treeData.character
+                    );
+                    if (refIndex >= 0) {
+                        parentTreeData.referenceLocations.splice(refIndex, 0, commentTreeData);
+                        this._onDidChangeTreeData.fire(parent);
+                        return true;
+                    }
+                } else if (parentTreeData.children) {
+                    // Find node in parent's children
+                    const childIndex = parentTreeData.children.findIndex((child: any) => child === node.treeData);
+                    if (childIndex >= 0) {
+                        parentTreeData.children.splice(childIndex, 0, commentTreeData);
+                        this._onDidChangeTreeData.fire(parent);
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        // Edit comment text for a comment node
+        editComment(node: NixUpstreamNode, newText: string): void {
+            if (node.treeData && node.treeData.isComment) {
+                node.treeData.commentText = newText;
+                node.treeData.name = newText;
+                node.label = `💬 ${newText}`;
+                node.tooltip = newText;
+                this._onDidChangeTreeData.fire(node);
+            }
+        }
+
+        // Delete a comment node
+        deleteComment(node: NixUpstreamNode): boolean {
+            if (!node.treeData || !node.treeData.isComment) {
+                return false;
+            }
+
+            const parent = this.nodeParentMap.get(node);
+
+            if (!parent) {
+                // Comment is at root level
+                const commentIndex = this.callTrees.findIndex(tree => tree === node.treeData);
+                if (commentIndex >= 0) {
+                    this.callTrees.splice(commentIndex, 1);
+                    this.rootNodes = [];
+                    this._onDidChangeTreeData.fire();
+                    return true;
+                }
+            } else {
+                // Comment has a parent
+                const parentTreeData = parent.treeData;
+
+                // Check in referenceLocations first
+                if (parentTreeData.referenceLocations) {
+                    const refIndex = parentTreeData.referenceLocations.findIndex((ref: any) => ref === node.treeData);
+                    if (refIndex >= 0) {
+                        parentTreeData.referenceLocations.splice(refIndex, 1);
+                        this._onDidChangeTreeData.fire(parent);
+                        return true;
+                    }
+                }
+
+                // Check in children
+                if (parentTreeData.children) {
+                    const childIndex = parentTreeData.children.findIndex((child: any) => child === node.treeData);
+                    if (childIndex >= 0) {
+                        parentTreeData.children.splice(childIndex, 1);
+                        this._onDidChangeTreeData.fire(parent);
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         // Helper function to determine type indicator based on file path and context
@@ -2247,6 +2408,18 @@ export function deactivate() {}
         }
 
         nodeFromTree(tree: any, checked: boolean, isRoot: boolean = false): NixUpstreamNode {
+            // Handle comment nodes
+            if (tree.isComment) {
+                const commentNode = new NixUpstreamNode(
+                    `💬 ${tree.commentText}`,
+                    tree.commentText,
+                    false,
+                    tree,
+                    vscode.TreeItemCollapsibleState.None
+                );
+                return commentNode;
+            }
+
             // Handle reference location nodes differently
             let label: string;
             let tooltip: string;
@@ -2372,6 +2545,7 @@ export function deactivate() {}
 class NixUpstreamNode extends vscode.TreeItem {
     public treeData: any;
     public checked: boolean;
+    public isCommentNode?: boolean;
     constructor(
         label: string,
         tooltip: string,
@@ -2383,19 +2557,24 @@ class NixUpstreamNode extends vscode.TreeItem {
         (this as vscode.TreeItem).tooltip = tooltip;
         this.checked = checked;
         this.treeData = treeData;
+        this.isCommentNode = treeData?.isComment || false;
 
         // Only set context value and checkbox for actual data nodes (not info messages)
         if (treeData) {
             // Set different context values for reference nodes vs method/class nodes
-            if (treeData.isReference) {
+            if (treeData.isComment) {
+                (this as vscode.TreeItem).contextValue = 'nixUpstreamComment';
+            } else if (treeData.isReference) {
                 (this as vscode.TreeItem).contextValue = 'nixUpstreamReference';
             } else {
                 (this as vscode.TreeItem).contextValue = 'nixUpstreamNode';
             }
-            // Set checkbox state using the proper VSCode API
-            (this as vscode.TreeItem).checkboxState = checked
-                ? vscode.TreeItemCheckboxState.Checked
-                : vscode.TreeItemCheckboxState.Unchecked;
+            // Set checkbox state using the proper VSCode API (not for comments)
+            if (!treeData.isComment) {
+                (this as vscode.TreeItem).checkboxState = checked
+                    ? vscode.TreeItemCheckboxState.Checked
+                    : vscode.TreeItemCheckboxState.Unchecked;
+            }
         } else {
             // Informational nodes - no context menu or checkbox
             (this as vscode.TreeItem).contextValue = 'nixUpstreamInfo';

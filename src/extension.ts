@@ -1526,24 +1526,31 @@ export function activate(context: vscode.ExtensionContext) {
         let itemName = '';
         let namespace = '';
 
-        // Try method patterns first
-        const methodMatch = lineText.match(methodRegexWithKeywords) ||
-                           lineText.match(methodRegexNoKeywordsPermissive);
-        if (methodMatch) {
-            // Extract method name (last capture group)
-            itemName = methodMatch[methodMatch.length - 1];
+        // Check if there's selected text - if so, use that as the display name
+        const selectedText = document.getText(editor.selection).trim();
+        if (selectedText && !editor.selection.isEmpty) {
+            // Use selected text as the display name (limit to reasonable length)
+            itemName = selectedText.substring(0, 100);
         } else {
-            // Try class pattern
-            const classMatch = lineText.match(classRegex);
-            if (classMatch) {
-                itemName = classMatch[1];
+            // Try method patterns first
+            const methodMatch = lineText.match(methodRegexWithKeywords) ||
+                               lineText.match(methodRegexNoKeywordsPermissive);
+            if (methodMatch) {
+                // Extract method name (last capture group)
+                itemName = methodMatch[methodMatch.length - 1];
             } else {
-                // Fallback: use first word or first identifier
-                const identifierMatch = lineText.match(/\b([A-Za-z_]\w*)\b/);
-                if (identifierMatch) {
-                    itemName = identifierMatch[1];
+                // Try class pattern
+                const classMatch = lineText.match(classRegex);
+                if (classMatch) {
+                    itemName = classMatch[1];
                 } else {
-                    itemName = lineText.substring(0, 50); // Use first 50 chars
+                    // Fallback: use first word or first identifier
+                    const identifierMatch = lineText.match(/\b([A-Za-z_]\w*)\b/);
+                    if (identifierMatch) {
+                        itemName = identifierMatch[1];
+                    } else {
+                        itemName = lineText.substring(0, 50); // Use first 50 chars
+                    }
                 }
             }
         }

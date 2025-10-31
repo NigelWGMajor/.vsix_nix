@@ -968,7 +968,8 @@ export function activate(context: vscode.ExtensionContext) {
     const treeDataProvider = new NixUpstreamTreeProvider();
     const treeView = vscode.window.createTreeView('nixUpstreamCheckTree', {
         treeDataProvider,
-        manageCheckboxStateManually: true  // We'll handle checkbox state ourselves
+        manageCheckboxStateManually: true,  // We'll handle checkbox state ourselves
+        dragAndDropController: treeDataProvider  // Enable drag-and-drop
     });
     context.subscriptions.push(treeView);
 
@@ -1632,13 +1633,17 @@ export function deactivate() {}
 
 // Placeholder tree provider
 
-    class NixUpstreamTreeProvider implements vscode.TreeDataProvider<NixUpstreamNode> {
+    class NixUpstreamTreeProvider implements vscode.TreeDataProvider<NixUpstreamNode>, vscode.TreeDragAndDropController<NixUpstreamNode> {
         private _onDidChangeTreeData: vscode.EventEmitter<NixUpstreamNode | undefined | void> = new vscode.EventEmitter<NixUpstreamNode | undefined | void>();
         readonly onDidChangeTreeData: vscode.Event<NixUpstreamNode | undefined | void> = this._onDidChangeTreeData.event;
         private callTrees: any[] = [];
         private rootNodes: NixUpstreamNode[] = [];
         private nodeParentMap: Map<NixUpstreamNode, NixUpstreamNode | undefined> = new Map();
         private checkedStates: Map<string, boolean> = new Map(); // Track checkbox states
+
+        // Drag and drop support
+        dropMimeTypes = ['application/vnd.code.tree.nixupstreamchecktree'];
+        dragMimeTypes = ['text/uri-list'];
 
         setCallTree(tree: any) {
             this.callTrees = [tree];
@@ -2546,6 +2551,121 @@ export function deactivate() {}
                 };
             }
             return node;
+        }
+
+        // Handle drag operation - provide data about what's being dragged
+        public async handleDrag(source: readonly NixUpstreamNode[], dataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+            // Store the nodes being dragged
+            dataTransfer.set('application/vnd.code.tree.nixupstreamchecktree', new vscode.DataTransferItem(source));
+        }
+
+        // Handle drop operation - reorder siblings
+        public async handleDrop(target: NixUpstreamNode | undefined, dataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+            const transferItem = dataTransfer.get('application/vnd.code.tree.nixupstreamchecktree');
+            if (!transferItem) {
+                return;
+            }
+
+            const draggedNodes: readonly NixUpstreamNode[] = transferItem.value;
+            if (!draggedNodes || draggedNodes.length === 0) {
+                return;
+            }
+
+            // Get the first dragged node (for simplicity, only support single node drag)
+            const draggedNode = draggedNodes[0];
+            if (!draggedNode || !draggedNode.treeData) {
+                return;
+            }
+
+            // Determine the parent of the dragged node
+            const draggedParent = this.nodeParentMap.get(draggedNode);
+
+            // Determine the target parent
+            let targetParent: NixUpstreamNode | undefined;
+            let targetArray: any[];
+            let targetIndex: number;
+
+            if (!target) {
+                // Dropped at the root level
+                targetParent = undefined;
+                targetArray = this.callTrees;
+                targetIndex = targetArray.length; // Append to end
+            } else {
+                // Dropped on another node - insert as sibling
+                targetParent = this.nodeParentMap.get(target);
+
+                // Find the appropriate array and index
+                if (!targetParent) {
+                    // Target is at root level
+                    targetArray = this.callTrees;
+                    targetIndex = targetArray.findIndex(t => t === target.treeData);
+                } else {
+                    // Target has a parent - check if it's in children or referenceLocations
+                    if (target.treeData.isReference && targetParent.treeData.referenceLocations) {
+                        targetArray = targetParent.treeData.referenceLocations;
+                        targetIndex = targetArray.findIndex(ref =>
+                            ref.file === target.treeData.file &&
+                            ref.line === target.treeData.line &&
+                            ref.character === target.treeData.character
+                        );
+                    } else if (targetParent.treeData.children) {
+                        targetArray = targetParent.treeData.children;
+                        targetIndex = targetArray.findIndex(child => child === target.treeData);
+                    } else {
+                        return; // Can't find target
+                    }
+                }
+            }
+
+            // Only allow reordering within the same parent (sibling reordering)
+            if (draggedParent !== targetParent) {
+                vscode.window.showWarningMessage('Can only reorder items at the same level');
+                return;
+            }
+
+            // Find and remove the dragged item from its current position
+            let sourceArray: any[];
+            let sourceIndex: number;
+
+            if (!draggedParent) {
+                // Dragged from root level
+                sourceArray = this.callTrees;
+                sourceIndex = sourceArray.findIndex(t => t === draggedNode.treeData);
+            } else {
+                // Dragged from within a parent
+                if (draggedNode.treeData.isReference && draggedParent.treeData.referenceLocations) {
+                    sourceArray = draggedParent.treeData.referenceLocations;
+                    sourceIndex = sourceArray.findIndex(ref =>
+                        ref.file === draggedNode.treeData.file &&
+                        ref.line === draggedNode.treeData.line &&
+                        ref.character === draggedNode.treeData.character
+                    );
+                } else if (draggedParent.treeData.children) {
+                    sourceArray = draggedParent.treeData.children;
+                    sourceIndex = sourceArray.findIndex(child => child === draggedNode.treeData);
+                } else {
+                    return; // Can't find source
+                }
+            }
+
+            if (sourceIndex < 0 || targetIndex < 0) {
+                return; // Invalid indices
+            }
+
+            // Remove from source position
+            const [movedItem] = sourceArray.splice(sourceIndex, 1);
+
+            // Adjust target index if needed (if moving within same array and moving down)
+            if (sourceArray === targetArray && sourceIndex < targetIndex) {
+                targetIndex--;
+            }
+
+            // Insert at target position
+            targetArray.splice(targetIndex, 0, movedItem);
+
+            // Refresh the tree
+            this.rootNodes = [];
+            this._onDidChangeTreeData.fire(draggedParent);
         }
     }
 

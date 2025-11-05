@@ -26,6 +26,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.deactivate = exports.activate = void 0;
 // Entry point for the Nix Upstream Check extension
 const vscode = __importStar(require("vscode"));
+const treeWebview_1 = require("./treeWebview");
 function activate(context) {
     // Create output channel for diagnostics
     const outputChannel = vscode.window.createOutputChannel('Nix Upstream Check Diagnostics');
@@ -36,17 +37,20 @@ function activate(context) {
     // - Class methods with modifiers: public async Task Method()
     // - Interface methods with no modifiers: Task Method()
     // - Complex generic types: Task<List<Type.NestedType>>
-    // Pattern 1: Has at least one keyword (class methods)
-    const methodRegexWithKeywords = /(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial)\s+(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial|\s)*([\w<>\[\],\s.]+)\s+(\w+)\s*\(/;
-    // Pattern 2a: PERMISSIVE - for cursor detection (matches any return type)
-    // Simplified to match any valid type identifier ([\w.]+) with optional generics
-    const methodRegexNoKeywordsPermissive = /^\s*([\w.]+)(<[\s\S]*?>)?\s+(\w+)\s*\(/;
+    // Pattern 1: Has at least one keyword (class methods) - supports tuples in return type
+    const methodRegexWithKeywords = /(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial)\s+(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial|\s)*([\w<>\[\],\s.?()]+)\s+(\w+)\s*\(/;
+    // Pattern 2a: PERMISSIVE - for cursor detection (matches any return type including tuples)
+    // Matches: Task<(type, type)>, Task<type>, or simple types
+    const methodRegexNoKeywordsPermissive = /^\s*([\w.]+)(<[^>]*(?:\([^)]*\)[^>]*)?>)?\s+(\w+)\s*\(/;
     // Pattern 2b: RESTRICTIVE - for finding enclosing methods (known return types only)
     // Used during reference search to avoid false positives like variable declarations
     const methodRegexNoKeywordsRestrictive = /^\s*(Task|ValueTask|void|int|long|string|bool|double|float|decimal|byte|char|short|object|IEnumerable|ICollection|IList|IAsyncEnumerable|List|Dictionary|Action|Func)(<[\s\S]*?>)?\s+(\w+)\s*\(/;
     // Pattern for class detection
     // Matches: class MyClass, public class MyClass, public sealed class MyClass, etc.
     const classRegex = /\b(?:public|private|protected|internal)?\s*(?:abstract|sealed|static|partial)?\s*class\s+(\w+)/;
+    // Pattern for interface detection
+    // Matches: interface IMyInterface, public interface IMyInterface, etc.
+    const interfaceRegex = /\b(?:public|private|protected|internal)?\s*(?:partial)?\s*interface\s+(\w+)/;
     // Helper function: check if line looks like code that's NOT a method definition
     const isNonMethodCode = (line) => {
         const trimmed = line.trim();
@@ -175,9 +179,17 @@ function activate(context) {
             await handleClassChangeAnalysis(className, document, position, outputChannel, context);
             return;
         }
+        // Try to detect interface definition
+        const interfaceMatch = signatureText.match(interfaceRegex);
+        if (interfaceMatch) {
+            const interfaceName = interfaceMatch[1];
+            // Handle interface like a class
+            await handleClassChangeAnalysis(interfaceName, document, position, outputChannel, context);
+            return;
+        }
         // Validate it's a method definition at cursor
         if (!isMethodDefinitionAtCursor(signatureText)) {
-            vscode.window.showWarningMessage('Could not detect a C# method or class definition at the cursor. Make sure cursor is on a method signature or class definition.');
+            vscode.window.showWarningMessage('Could not detect a C# method, class, or interface definition at the cursor. Make sure cursor is on a method signature, class, or interface definition.');
             return;
         }
         const match = getMethodMatchAtCursor(signatureText);
@@ -237,7 +249,6 @@ function activate(context) {
             const rootNodes = treeDataProvider.getRootNodes();
             if (rootNodes && rootNodes.length > 0) {
                 const latestRoot = rootNodes[rootNodes.length - 1];
-                await treeView.reveal(latestRoot, { select: false, focus: false, expand: true });
             }
             return result.tree;
         });
@@ -452,7 +463,6 @@ function activate(context) {
             const rootNodes = treeDataProvider.getRootNodes();
             if (rootNodes && rootNodes.length > 0) {
                 const latestRoot = rootNodes[rootNodes.length - 1];
-                await treeView.reveal(latestRoot, { select: false, focus: false, expand: true });
             }
             vscode.window.showInformationMessage(`✅ Class impact analysis complete for ${className}: ${categorizedRefs.length} relevant references found`);
         });
@@ -807,25 +817,9 @@ function activate(context) {
         const finalTree = { name: methodName, namespace: namespaceName, file: documentUri.fsPath, line: position.line, children: upstreamNodes };
         return { tree: finalTree, apiUsed };
     }
-    // Register the tree data provider for the sidebar
-    const treeDataProvider = new NixUpstreamTreeProvider();
-    const treeView = vscode.window.createTreeView('nixUpstreamCheckTree', {
-        treeDataProvider,
-        manageCheckboxStateManually: true,
-        dragAndDropController: treeDataProvider // Enable drag-and-drop
-    });
-    context.subscriptions.push(treeView);
-    // Handle checkbox state changes
-    treeView.onDidChangeCheckboxState(e => {
-        e.items.forEach(([item, state]) => {
-            if (item.treeData) {
-                const isChecked = state === vscode.TreeItemCheckboxState.Checked;
-                item.checked = isChecked;
-                item.treeData.checked = isChecked;
-                treeDataProvider.updateCheckboxState(item, isChecked);
-            }
-        });
-    });
+    // Register the webview tree provider for the sidebar
+    const treeDataProvider = new treeWebview_1.NixUpstreamTreeWebviewProvider(context.extensionUri, context);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(treeWebview_1.NixUpstreamTreeWebviewProvider.viewType, treeDataProvider));
     // Register command to open file location when clicking on tree nodes
     let openLocationCommand = vscode.commands.registerCommand('nixUpstreamCheck.openLocation', async (treeData) => {
         if (treeData.file && typeof treeData.line === 'number') {
@@ -1028,7 +1022,6 @@ function activate(context) {
             const rootNodes = treeDataProvider.getRootNodes();
             if (rootNodes && rootNodes.length > 0) {
                 const latestRoot = rootNodes[rootNodes.length - 1];
-                await treeView.reveal(latestRoot, { select: false, focus: false, expand: true });
             }
             return result.tree;
         });
@@ -1042,52 +1035,7 @@ function activate(context) {
     context.subscriptions.push(searchUpstreamFromReferenceCommand);
     // Register command to expand all tree nodes
     let expandAllCommand = vscode.commands.registerCommand('nixUpstreamCheck.expandAll', async () => {
-        // Helper to delay (using a proper async approach)
-        const delay = (ms) => new Promise(resolve => {
-            const timer = globalThis.setTimeout(() => resolve(), ms);
-            return timer;
-        });
-        const expandRecursively = async (node, depth = 0) => {
-            // Always try to reveal with expand
-            try {
-                await treeView.reveal(node, { select: false, focus: false, expand: true });
-                // Wait a bit after revealing to let the UI update
-                await delay(50);
-            }
-            catch (e) {
-                // Ignore errors if node can't be revealed
-            }
-            // Get children after expansion
-            const children = await treeDataProvider.getChildren(node);
-            if (children && children.length > 0) {
-                // Process children sequentially to avoid overwhelming the UI
-                for (const child of children) {
-                    await expandRecursively(child, depth + 1);
-                }
-            }
-        };
-        // Show progress
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: "Expanding tree...",
-            cancellable: false
-        }, async (progress) => {
-            const rootNodes = treeDataProvider.getRootNodes();
-            // Run twice to catch any nodes that were missed due to async timing
-            for (let pass = 1; pass <= 2; pass++) {
-                progress.report({
-                    message: `Pass ${pass}/2...`,
-                    increment: 0
-                });
-                for (let i = 0; i < rootNodes.length; i++) {
-                    progress.report({
-                        message: `Pass ${pass}/2: Expanding tree ${i + 1}/${rootNodes.length}...`,
-                        increment: (50 / rootNodes.length)
-                    });
-                    await expandRecursively(rootNodes[i]);
-                }
-            }
-        });
+        treeDataProvider.expandAll();
     });
     context.subscriptions.push(expandAllCommand);
     // Register command to prune unchecked items
@@ -1154,14 +1102,44 @@ function activate(context) {
         }
         const exportData = {
             exportedAt: new Date().toISOString(),
-            trees: trees.map((tree) => treeDataProvider.serializeTreeWithCheckboxes(tree))
+            trees: trees.map((tree) => treeDataProvider.serializeTreeWithCheckboxes(tree)),
+            expandedNodes: Array.from(treeDataProvider.getExpandedNodes())
         };
         // Use the first tree's root member name as default filename
         const firstTree = trees[0];
         const defaultName = firstTree.name ? `${firstTree.name}.upstream.json` : 'upstream-references.upstream.json';
+        // Get last saved location from workspace state, or use .data folder
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        let defaultUri;
+        const lastSavedPath = context.workspaceState.get('lastUpstreamSavePath');
+        if (lastSavedPath) {
+            // Use last saved directory
+            vscode.window.showInformationMessage(`DEBUG Export: Using last saved path: ${lastSavedPath}`);
+            const pathParts = lastSavedPath.split(/[/\\]/);
+            pathParts.pop(); // Remove filename
+            const lastDir = pathParts.join('/');
+            defaultUri = vscode.Uri.file(lastDir + '/' + defaultName);
+        }
+        else if (workspaceFolders && workspaceFolders.length > 0) {
+            const workspaceRoot = workspaceFolders[0].uri;
+            const dataFolder = vscode.Uri.joinPath(workspaceRoot, '.data');
+            // Check if .data folder exists
+            try {
+                await vscode.workspace.fs.stat(dataFolder);
+                // .data exists, use it
+                defaultUri = vscode.Uri.joinPath(dataFolder, defaultName);
+            }
+            catch {
+                // .data doesn't exist, use workspace root
+                defaultUri = vscode.Uri.joinPath(workspaceRoot, defaultName);
+            }
+        }
+        else {
+            defaultUri = vscode.Uri.file(defaultName);
+        }
         const jsonContent = JSON.stringify(exportData, null, 2);
         const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(defaultName),
+            defaultUri: defaultUri,
             filters: { 'Upstream JSON': ['upstream.json'] }
         });
         if (uri) {
@@ -1170,6 +1148,9 @@ function activate(context) {
                 bytes[i] = jsonContent.charCodeAt(i);
             }
             await vscode.workspace.fs.writeFile(uri, bytes);
+            // Remember this save location
+            context.workspaceState.update('lastUpstreamSavePath', uri.fsPath);
+            vscode.window.showInformationMessage(`DEBUG: Saved path to workspace state: ${uri.fsPath}`);
             vscode.window.showInformationMessage(`Tree exported to ${uri.fsPath}`);
         }
     });
@@ -1198,11 +1179,40 @@ function activate(context) {
         // If URI is provided (from file explorer click), use it; otherwise show file picker
         let fileUri = uri;
         if (!fileUri) {
-            // Get workspace folder as default directory
+            // Get default directory for import dialog
+            // Priority: last saved path > .data folder > workspace root
             const workspaceFolders = vscode.workspace.workspaceFolders;
             let defaultUri;
-            if (workspaceFolders && workspaceFolders.length > 0) {
-                defaultUri = workspaceFolders[0].uri;
+            // Check for last saved path
+            const lastSavedPath = context.workspaceState.get('lastUpstreamSavePath');
+            vscode.window.showInformationMessage(`DEBUG Import: Last saved path from state: ${lastSavedPath || 'none'}`);
+            if (lastSavedPath) {
+                try {
+                    const lastUri = vscode.Uri.file(lastSavedPath);
+                    await vscode.workspace.fs.stat(lastUri);
+                    // File exists, use its directory
+                    const pathParts = lastSavedPath.split(/[/\\]/);
+                    pathParts.pop(); // Remove filename
+                    const dirPath = pathParts.join('/');
+                    defaultUri = vscode.Uri.file(dirPath);
+                    vscode.window.showInformationMessage(`DEBUG Import: Using directory: ${dirPath}`);
+                }
+                catch {
+                    // File doesn't exist, fall through to next option
+                    vscode.window.showInformationMessage(`DEBUG Import: Last saved file doesn't exist, falling back`);
+                }
+            }
+            if (!defaultUri && workspaceFolders && workspaceFolders.length > 0) {
+                // Check if .data folder exists in workspace root
+                const dataFolderUri = vscode.Uri.joinPath(workspaceFolders[0].uri, '.data');
+                try {
+                    await vscode.workspace.fs.stat(dataFolderUri);
+                    defaultUri = dataFolderUri;
+                }
+                catch {
+                    // .data doesn't exist, use workspace root
+                    defaultUri = workspaceFolders[0].uri;
+                }
             }
             const result = await vscode.window.showOpenDialog({
                 canSelectFiles: true,
@@ -1242,6 +1252,10 @@ function activate(context) {
                 // Restore checkbox states from the imported tree
                 treeDataProvider.restoreCheckboxStates(tree);
             });
+            // Restore expanded nodes if present in the imported data
+            if (importData.expandedNodes && Array.isArray(importData.expandedNodes)) {
+                treeDataProvider.restoreExpandedNodes(importData.expandedNodes);
+            }
             vscode.window.showInformationMessage(`Added ${importData.trees.length} tree(s) from ${fileUri.fsPath}`);
         }
         catch (error) {
@@ -1332,7 +1346,6 @@ function activate(context) {
             // Item already exists, reveal it in the tree
             const existingNode = treeDataProvider.findNodeByFileAndLine(document.uri.fsPath, position.line);
             if (existingNode) {
-                treeView.reveal(existingNode, { select: true, focus: true, expand: false });
                 vscode.window.showInformationMessage(`"${itemName}" is already in the tree (selected).`);
             }
             else {

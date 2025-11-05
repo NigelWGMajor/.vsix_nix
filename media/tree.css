@@ -1,0 +1,182 @@
+body {
+    padding: 0;
+    margin: 0;
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    color: var(--vscode-foreground);
+    background-color: var(--vscode-sideBar-background);
+}
+
+#tree-container {
+    padding: 4px 0;
+}
+
+.tree-node {
+    display: flex;
+    align-items: center;
+    padding: 0;
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    min-height: 22px;
+}
+
+.tree-node:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.tree-node.selected {
+    background-color: var(--vscode-list-activeSelectionBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+}
+
+.tree-node.focused {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
+/* Indent guides - colored vertical lines */
+.indent-container {
+    display: flex;
+    flex-shrink: 0;
+    height: 100%;
+    align-items: stretch;
+}
+
+.indent-guide {
+    width: 16px;
+    position: relative;
+    flex-shrink: 0;
+    min-height: 22px;
+}
+
+.indent-guide::before {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background-color: currentColor;
+}
+
+/* Resistor color code for indent levels - 50% opacity */
+.indent-guide.level-0::before { background-color: #8B4513 !important; opacity: 0.5; } /* Brown */
+.indent-guide.level-1::before { background-color: #FF0000 !important; opacity: 0.5; } /* Red */
+.indent-guide.level-2::before { background-color: #FFA500 !important; opacity: 0.5; } /* Orange */
+.indent-guide.level-3::before { background-color: #FFFF00 !important; opacity: 0.5; } /* Yellow */
+.indent-guide.level-4::before { background-color: #00FF00 !important; opacity: 0.5; } /* Green */
+.indent-guide.level-5::before { background-color: #0000FF !important; opacity: 0.5; } /* Blue */
+.indent-guide.level-6::before { background-color: #8B00FF !important; opacity: 0.5; } /* Violet */
+.indent-guide.level-7::before { background-color: #808080 !important; opacity: 0.5; } /* Gray */
+.indent-guide.level-8::before { background-color: #FFFFFF !important; opacity: 0.5; } /* White */
+.indent-guide.level-9::before { background-color: #FF00FF !important; opacity: 0.5; } /* Pink/Magenta */
+.indent-guide.level-10::before { background-color: #00FFFF !important; opacity: 0.5; } /* Cyan */
+
+/* Black line for leaf nodes (references with no children) */
+.indent-guide.leaf-line::before { background-color: #000000 !important; opacity: 0.3; }
+
+.expand-icon {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    cursor: pointer;
+    margin-right: 2px;
+}
+
+.expand-icon:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.expand-icon.collapsed::before {
+    content: '▶';
+    font-size: 10px;
+}
+
+.expand-icon.expanded::before {
+    content: '▼';
+    font-size: 10px;
+}
+
+.expand-icon.leaf {
+    visibility: hidden;
+}
+
+.checkbox {
+    width: 16px;
+    height: 16px;
+    margin-right: 4px;
+    flex-shrink: 0;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-color: #666666;
+    border: 1px solid #888888;
+    border-radius: 3px;
+    position: relative;
+}
+
+.checkbox:checked::after {
+    content: '✓';
+    position: absolute;
+    top: -2px;
+    left: 2px;
+    font-size: 14px;
+    font-weight: bold;
+    color: var(--vscode-editor-background);
+}
+
+.node-label {
+    flex: 1;
+    padding: 1px 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.node-icon {
+    margin-right: 4px;
+}
+
+.comment-node {
+    font-style: italic;
+    opacity: 0.9;
+}
+
+.reference-node {
+    opacity: 0.85;
+}
+
+/* Hidden children */
+.tree-node.collapsed + .children {
+    display: none;
+}
+
+.children {
+    display: block;
+}
+
+/* Type indicators */
+.type-indicator {
+    font-weight: bold;
+    margin-right: 4px;
+}
+
+/* Instructions when empty */
+.empty-state {
+    padding: 16px;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+}
+
+.empty-state h3 {
+    margin-top: 0;
+}
+
+.empty-state ul {
+    text-align: left;
+    display: inline-block;
+}

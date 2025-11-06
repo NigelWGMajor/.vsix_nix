@@ -21,21 +21,6 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "configuration": {
-      "title": "Nix Upstream Check",
-      "properties": {
-        "nixUpstreamCheck.enableFileScanFallback": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable slow file scan when language server returns no results. Disable to speed up searches for methods without references (like tests)."
-        },
-        "nixUpstreamCheck.enablePruneDebugOutput": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable detailed debug output when pruning unchecked items from the tree."
-        }
-      }
-    },
     "commands": [
       {
         "command": "nixUpstreamCheck.start",

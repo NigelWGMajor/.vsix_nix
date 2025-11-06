@@ -2,70 +2,54 @@
 
 A Visual Studio Code extension for C# developers that traces and visualizes all upstream method callers in an interactive tree view.
 
+## tl;dr
+
+Finds upstream references to C# members. 
+
+Results are shown in a tree with
+
+- category indicators (Interface, Contoller, Orchestrator, Test ...)
+- informational tooltips
+- clickable link to location
+- clickable link to where referenced 📍
+- checkboxes for marking to-do or done ☑️
+- load and save as upstream.json files
+- manual additions and comments
+- additional tools for pruning, copying as markdown, etc.
+
 ## Features
 
-### 🔍 Smart Reference Detection
 - **Multi-strategy search**: Uses VS Code's Call Hierarchy API, CodeLens API, Reference Provider API, and optional file scanning
 - **Accurate results**: Finds exact call locations with line and character positions
 - **Auto-expands**: Automatically opens the tree view when you run a search
-- **Recursive traversal**: Traces the entire call chain from your method up to HTTP controllers
-
-### 📊 Interactive Tree View
-- **Reference locations**: See exact file locations (📍) where each method is called
-- **Clickable nodes**: Jump directly to any method definition or reference location
-- **Checkboxes**: Mark items for review or attention, prune unneeded items
-- **Multiple searches**: Accumulate results from multiple searches in the same tree
-- **Manual additions**: A button allows you to manually add the current line reference below the tree
-
-### 🛠️ Powerful Tools
-- **Expand All**: Recursively expand the entire tree
-- **Prune Unchecked**: Remove all unchecked items to focus on what matters
-- **Export as JSON**: Save the complete tree with checkbox states
-- **Export as Markdown**: Generate a formatted report with clickable links
-- **Exhaustive Search**: Right-click any node to force a deep file scan
-- **Clear Tree**: Start fresh with a new search
+- **Category indicators**: Tags methods as Interface, Controller, Orchestrator, Test, etc. based on naming conventions and attributes
 
 ## Usage
 
-1. **Build your C# project** (`dotnet build`) to ensure the language server has indexed your code
-2. **Place your cursor** on any C# method definition
-3. **Right-click** and select **"Check Method Callers"**
-4. The sidebar will open automatically showing the call tree
+- **Build your C# project** (`dotnet build`) to ensure the language server has indexed your code
+- Ensure that the solution is fully loaded (and references are shown in the codelens tips)
+- **Place your cursor** on any C# method definition
+- **Right-click** and select **"Check Upstream"**
+- A messagebar will show the progress
+- The call tree will be shown in the sidebar
+- Clicking on a node will locate the item in your solution
+- Right-click for context menu options
+- Use the toolbar icons to
+  - Add a link to the current selection
+  - Expand the tree
+  - Load from a file
+  - Save to a file
+  - Copy to the clipboard as markdown
+  - Prune unchecked items
+  - Clear the tree
 
 ## Persistence
 
 If you save the treeview as xxx.upstream.json you can load it directly from the explorer by right-click `Load as Upstream Json` or double-clicking the file.
-
-### Tree Structure
-
-```
-MethodA
-├─ 📍 FileX.cs:42:10      ← Exact call location (clickable)
-├─ 📍 FileY.cs:158:5      ← Another call location
-├─ MethodB                ← Calling method
-│  ├─ 📍 FileZ.cs:89:12
-│  └─ MethodC             ← Further upstream
-└─ MethodD [HttpGet]      ← Stops at controllers
-   └─ 📍 FileW.cs:201:8
-```
-
-### Toolbar Buttons
-- 🔍 **Expand All** - Recursively expand all tree nodes
-- 💾 **Export as JSON** - Save tree data with checkbox states
-- 📝 **Export as Markdown** - Generate a formatted report
-- 🔽 **Prune Unchecked** - Remove unchecked items
-- ❌ **Clear Tree** - Remove all results
-
-### Settings
-- `nixUpstreamCheck.enableFileScanFallback` - Enable slow file scan when language server returns no results (default: false)
+the default folder is the workspace root, unless there is a.data folder there, in which case that will be preferred.
 
 ## Requirements
+
 - Visual Studio Code 1.70.0 or higher
 - C# extension (ms-dotnettools.csharp)
 - .NET project built and indexed
-
-## Development
-- All code is in the `.vsix_nix` folder
-- Run `npm install` and `npm run compile` to build
-- Run `npx @vscode/vsce package` to create the VSIX file
-- Press F5 in VS Code to launch the extension in debug mode

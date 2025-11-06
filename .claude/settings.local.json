@@ -1,9 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm run compile:*)",
-      "Bash(npx @vscode/vsce:*)",
-      "Bash(dir \"C:\\source\\Nix\\_vsc_cs\\upstream\\src\"\")"
+      "Bash(npx @vscode/vsce package:*)",
+      "Bash(npm run compile:*)"
     ],
     "deny": [],
     "ask": []

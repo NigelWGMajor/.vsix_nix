@@ -7,19 +7,14 @@
     let selectedNodes = new Set();
     let lastClickedNode = null;
 
-    console.log('Tree.js loaded, sending ready message');
-
     // Send ready message to extension
     vscode.postMessage({ type: 'ready' });
 
     // Handle messages from extension
     window.addEventListener('message', event => {
-        console.log('Received message in webview:', event.data.type);
         const message = event.data;
         switch (message.type) {
             case 'refresh':
-                console.log('Refreshing tree with data:', message.trees);
-                console.log('Expanded nodes from extension:', message.expandedNodes);
                 const wasEmpty = trees.length === 0;
                 trees = message.trees || [];
                 checkedStates = message.checkedStates || {};
@@ -27,29 +22,24 @@
                 // Restore expanded nodes from message if provided
                 if (message.expandedNodes && message.expandedNodes.length > 0) {
                     expandedNodes = new Set(message.expandedNodes);
-                    console.log('Restored expanded nodes count:', expandedNodes.size);
                 } else if (wasEmpty && trees.length > 0) {
                     // Auto-expand first level on initial load only if no expanded state provided
                     trees.forEach(tree => {
                         const rootKey = getNodeKey(tree);
                         expandedNodes.add(rootKey);
                     });
-                    console.log('Auto-expanded first level, count:', expandedNodes.size);
                 }
 
-                console.log('Trees loaded:', trees.length);
-                console.log('Final expanded nodes:', Array.from(expandedNodes));
                 renderTree();
                 break;
             case 'updateSelection':
                 selectedNodes = new Set(message.selectedIds || []);
                 updateSelectionUI();
                 break;
-            case 'toggleExpand':
-                toggleNodeExpansion(message.nodeId);
-                break;
-            case 'expandAll':
-                expandAllNodes();
+            case 'updateCheckboxes':
+                // Update only checkbox states without changing tree structure or expansion
+                checkedStates = message.checkedStates || {};
+                updateCheckboxUI();
                 break;
         }
     });
@@ -63,6 +53,13 @@
         if (e.ctrlKey && e.key === 'a') {
             e.preventDefault();
             vscode.postMessage({ type: 'selectAll' });
+        } else if (e.key === 'Delete' && isFocused && selectedNodes.size > 0) {
+            // Delete key removes selected nodes
+            e.preventDefault();
+            vscode.postMessage({
+                type: 'removeSelected',
+                nodeIds: Array.from(selectedNodes)
+            });
         } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.altKey && isFocused) {
             // Arrow keys work on selected items when tree has focus
             if (selectedNodes.size >= 1) {
@@ -75,6 +72,21 @@
                         nodeId: nodeId,
                         direction: e.key === 'ArrowUp' ? 'up' : 'down'
                     });
+                });
+            }
+        } else if (e.key === 'Tab' && isFocused && selectedNodes.size > 0) {
+            // Tab to indent, Shift+Tab to outdent
+            e.preventDefault();
+            const nodeIds = Array.from(selectedNodes);
+            if (e.shiftKey) {
+                vscode.postMessage({
+                    type: 'outdent',
+                    nodeIds: nodeIds
+                });
+            } else {
+                vscode.postMessage({
+                    type: 'indent',
+                    nodeIds: nodeIds
                 });
             }
         }
@@ -91,11 +103,9 @@
     }
 
     function renderTree() {
-        console.log('renderTree called, trees:', trees.length);
         const container = document.getElementById('tree-container');
 
         if (!trees || trees.length === 0) {
-            console.log('No trees to render, showing empty state');
             container.innerHTML = `
                 <div class="empty-state">
                     <h3>📋 How to use:</h3>
@@ -148,14 +158,13 @@
         indentContainer.className = 'indent-container';
         for (let i = 0; i < depth; i++) {
             const guide = document.createElement('div');
-            guide.className = `indent-guide level-${i % 11}`;
+            // For leaf nodes, use black line for the last indent guide
+            if (i === depth - 1 && !hasChildren && depth > 0) {
+                guide.className = 'indent-guide leaf-line';
+            } else {
+                guide.className = `indent-guide level-${i % 11}`;
+            }
             indentContainer.appendChild(guide);
-        }
-        // Add black line for leaf nodes (references without children)
-        if (!hasChildren && depth > 0) {
-            const leafGuide = document.createElement('div');
-            leafGuide.className = 'indent-guide leaf-line';
-            indentContainer.appendChild(leafGuide);
         }
         nodeDiv.appendChild(indentContainer);
 
@@ -176,6 +185,7 @@
             checkbox.type = 'checkbox';
             checkbox.className = 'checkbox';
             checkbox.checked = isChecked;
+            checkbox.dataset.nodeId = nodeKey; // Add nodeId to checkbox for debugging
             checkbox.addEventListener('click', (e) => {
                 e.stopPropagation();
                 // If multiple nodes are selected AND this node is one of them, toggle all selected
@@ -326,51 +336,48 @@
     function getTypeIndicator(node) {
         // Check file name for patterns
         const fileName = (node.file || '').toLowerCase();
+        let typeChar = '';
 
         // Check for test first (as test files might also contain 'controller', 'service', etc.)
-        if (fileName.includes('test')) return '𝐓';
-        if (fileName.includes('controller')) return '𝐂';
-        if (fileName.includes('service')) return '𝐒';
-        if (fileName.includes('repository')) return '𝐑';
-        if (fileName.includes('interface')) return '𝐈';
+        if (fileName.includes('test')) {
+            typeChar = '𝐓';
+        } else if (fileName.includes('orchestrator')) {
+            typeChar = '𝐎';
+        } else if (fileName.includes('controller')) {
+            typeChar = '𝐂';
+        } else if (fileName.includes('service')) {
+            typeChar = '𝐒';
+        } else if (fileName.includes('repository')) {
+            typeChar = '𝐑';
+        } else {
+            // Default to M for methods if no specific pattern matched
+            typeChar = '𝐌';
+        }
 
-        return '';
+        // If the node is an interface method (no body), prepend 𝐈
+        if (node.isInterface) {
+            // Combine: 𝐈 + type character (e.g., 𝐈𝐎 for interface in orchestrator)
+            return '𝐈' + typeChar;
+        }
+
+        return typeChar;
     }
 
     function toggleNodeExpansion(nodeKey) {
-        if (expandedNodes.has(nodeKey)) {
-            expandedNodes.delete(nodeKey);
-        } else {
-            expandedNodes.add(nodeKey);
-        }
-        // Sync expanded state back to extension
+        // Send toggle request to backend - backend is the source of truth
         vscode.postMessage({
-            type: 'syncExpanded',
-            expandedNodes: Array.from(expandedNodes)
+            type: 'toggleExpand',
+            nodeId: nodeKey
         });
-        renderTree();
     }
 
     function expandAllNodes() {
-        // Recursively find all nodes and add to expandedNodes
-        const addAllNodes = (node) => {
-            const nodeKey = getNodeKey(node);
-            const hasChildren = (node.children && node.children.length > 0) ||
-                              (node.referenceLocations && node.referenceLocations.length > 0);
-            if (hasChildren) {
-                expandedNodes.add(nodeKey);
-            }
-
-            if (node.referenceLocations) {
-                node.referenceLocations.forEach(ref => addAllNodes(ref));
-            }
-            if (node.children) {
-                node.children.forEach(child => addAllNodes(child));
-            }
-        };
-
-        trees.forEach(tree => addAllNodes(tree));
-        renderTree();
+        // Send expand all request to backend - backend is the source of truth
+        // Include current selection so backend can handle conditional expansion
+        vscode.postMessage({
+            type: 'expandAll',
+            selectedNodes: Array.from(selectedNodes)
+        });
     }
 
     function updateSelectionUI() {
@@ -384,12 +391,27 @@
         });
     }
 
+    function updateCheckboxUI() {
+        document.querySelectorAll('.tree-node').forEach(el => {
+            const nodeId = el.dataset.nodeId;
+            // Use direct child selector to avoid selecting checkboxes from nested nodes
+            const checkbox = Array.from(el.children).find(child =>
+                child.classList && child.classList.contains('checkbox')
+            );
+            if (checkbox) {
+                const isChecked = checkedStates[nodeId] !== false;
+                checkbox.checked = isChecked;
+            }
+        });
+    }
+
     function getNodeKey(node) {
         if (node.isComment) {
             return `comment_${node.commentText}_${node.file || ''}_${node.line || 0}`;
         }
         if (node.isReference) {
-            return `ref_${node.file}_${node.line}_${node.character}_${node.referenceType || ''}`;
+            const char = node.character !== undefined ? node.character : 0;
+            return `ref_${node.file}_${node.line}_${char}_${node.referenceType || ''}`;
         }
         return `${node.namespace || ''}.${node.name}_${node.file || ''}_${node.line || 0}`;
     }

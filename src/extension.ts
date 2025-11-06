@@ -16,9 +16,10 @@ export function activate(context: vscode.ExtensionContext) {
     // Pattern 1: Has at least one keyword (class methods) - supports tuples in return type
     const methodRegexWithKeywords = /(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial)\s+(?:public|private|protected|internal|static|virtual|override|async|sealed|extern|unsafe|new|partial|\s)*([\w<>\[\],\s.?()]+)\s+(\w+)\s*\(/;
 
-    // Pattern 2a: PERMISSIVE - for cursor detection (matches any return type including tuples)
-    // Matches: Task<(type, type)>, Task<type>, or simple types
-    const methodRegexNoKeywordsPermissive = /^\s*([\w.]+)(<[^>]*(?:\([^)]*\)[^>]*)?>)?\s+(\w+)\s*\(/;
+    // Pattern 2a: PERMISSIVE - for cursor detection (matches any return type including tuples and void)
+    // Matches: void, Task<IEnumerable<Type>>, Task<(type, type)>, Task<type>, or simple types
+    // Uses [\s\S]*? for generics to handle nested angle brackets
+    const methodRegexNoKeywordsPermissive = /^\s*(void|[\w.]+)(<[\s\S]*?>)?\s+(\w+)\s*\(/;
 
     // Pattern 2b: RESTRICTIVE - for finding enclosing methods (known return types only)
     // Used during reference search to avoid false positives like variable declarations
@@ -205,13 +206,50 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
 
+        // Check if this is an interface method (no body, ends with semicolon)
+        let isInterfaceMethod = false;
+        // Build complete signature including what comes after closing paren
+        let completeSignature = signatureText;
+        let lastSignatureLine = position.line;
+
+        // Find the last line that was included in signatureLines
+        if (foundStart) {
+            // signatureLines collection stopped when it found ')', so we need to continue from there
+            for (let i = position.line; i < Math.min(document.lineCount, position.line + 20); i++) {
+                const checkLine = document.lineAt(i).text;
+                if (checkLine.includes(')')) {
+                    lastSignatureLine = i;
+                    // Continue a few more lines to check for semicolon or opening brace
+                    for (let j = i; j < Math.min(document.lineCount, i + 5); j++) {
+                        const line = document.lineAt(j).text;
+                        completeSignature += ' ' + line.trim();
+                        if (line.includes(';') || line.includes('{')) {
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Clean the signature and check for interface pattern
+        const cleanSig = completeSignature.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+
+        // Check if it ends with semicolon (interface/abstract) or has opening brace (has body)
+        if (cleanSig.endsWith(';') || (cleanSig.includes(';') && !cleanSig.includes('{'))) {
+            isInterfaceMethod = true;
+        } else if (cleanSig.includes('{')) {
+            isInterfaceMethod = false;
+        }
+
         // Initialize the tree with the root method (add to existing trees, don't replace)
         const initialTree = {
             name: methodName,
             namespace: namespaceName,
             file: document.uri.fsPath,
             line: position.line,
-            children: []
+            children: [],
+            isInterface: isInterfaceMethod
         };
         treeDataProvider.addCallTree(initialTree);
 
@@ -246,7 +284,11 @@ export function activate(context: vscode.ExtensionContext) {
                 position,
                 progress,
                 token,
-                outputChannel
+                outputChannel,
+                new Set(),
+                0,
+                false,
+                isInterfaceMethod
             );
             // Replace the initial tree (last one added) with the completed result
             treeDataProvider.replaceLastTree(result.tree);
@@ -635,7 +677,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // Recursive upstream reference search
-    type MethodDef = { name: string; namespace: string; file: string; line: number; character?: number; httpAttribute?: string; referenceLocations?: Array<{ file: string; line: number; character: number; }> };
+    type MethodDef = { name: string; namespace: string; file: string; line: number; character?: number; httpAttribute?: string; isInterface?: boolean; referenceLocations?: Array<{ file: string; line: number; character: number; }> };
     type SearchResult = { tree: any; apiUsed: string };
 
     async function findUpstreamReferences(
@@ -648,9 +690,17 @@ export function activate(context: vscode.ExtensionContext) {
         outputChannel?: vscode.OutputChannel,
         visited: Set<string> = new Set(),
         depth: number = 0,
-        forceFileScan: boolean = false
+        forceFileScan: boolean = false,
+        isInterfaceMethod: boolean = false
     ): Promise<SearchResult> {
-        const emptyTree = { name: methodName, namespace: namespaceName, file: documentUri.fsPath, line: position.line, children: [] };
+        const emptyTree = {
+            name: methodName,
+            namespace: namespaceName,
+            file: documentUri.fsPath,
+            line: position.line,
+            children: [],
+            isInterface: isInterfaceMethod
+        };
 
         // Check for cancellation
         if (token?.isCancellationRequested) {
@@ -830,13 +880,48 @@ export function activate(context: vscode.ExtensionContext) {
                         }
                     }
 
+                    // Check if this is an interface method (no body, ends with semicolon)
+                    let isInterface = false;
+                    let signature = '';
+                    let foundClosingParen = false;
+                    let parenCount = 0;
+
+                    for (let k = ref.range.start.line; k < Math.min(doc.lineCount, ref.range.start.line + 20); k++) {
+                        const checkLine = doc.lineAt(k).text;
+                        signature += ' ' + checkLine;
+
+                        // Count parentheses
+                        for (const char of checkLine) {
+                            if (char === '(') parenCount++;
+                            if (char === ')') parenCount--;
+                        }
+
+                        if (!foundClosingParen && parenCount === 0 && checkLine.includes(')')) {
+                            foundClosingParen = true;
+                        }
+
+                        if (foundClosingParen) {
+                            const cleanSig = signature.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+
+                            if (cleanSig.endsWith(';') || (cleanSig.includes(';') && !cleanSig.includes('{'))) {
+                                isInterface = true;
+                                break;
+                            }
+                            if (cleanSig.includes('{') || checkLine.includes('{')) {
+                                isInterface = false;
+                                break;
+                            }
+                        }
+                    }
+
                     methodDef = {
                         name: extractedMethodName,
                         namespace: namespace,
                         file: ref.uri.fsPath,
                         line: ref.range.start.line,
                         character: refLine.indexOf(extractedMethodName),
-                        referenceLocations: []
+                        referenceLocations: [],
+                        isInterface: isInterface
                     };
                 }
             } else {
@@ -860,13 +945,87 @@ export function activate(context: vscode.ExtensionContext) {
                     const methodName = m[2];
                     const methodNameIndex = line.indexOf(methodName);
 
+                    // Check if this is an interface method (no body, ends with semicolon)
+                    let isInterface = false;
+                    // Build up the complete method signature (may span multiple lines)
+                    let signature = '';
+                    let foundClosingParen = false;
+                    let parenCount = 0;
+
+                    for (let k = j; k < Math.min(doc.lineCount, j + 20); k++) {
+                        const checkLine = doc.lineAt(k).text;
+                        signature += ' ' + checkLine;
+
+                        // Count parentheses to handle nested generic constraints
+                        for (const char of checkLine) {
+                            if (char === '(') parenCount++;
+                            if (char === ')') parenCount--;
+                        }
+
+                        // Check if we've found the closing parenthesis of the method signature
+                        if (!foundClosingParen && parenCount === 0 && checkLine.includes(')')) {
+                            foundClosingParen = true;
+                        }
+
+                        // Once we have the closing paren, check what follows (including generic constraints)
+                        if (foundClosingParen) {
+                            // Remove comments and whitespace to check the ending
+                            const cleanSig = signature.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+
+                            // Check if it ends with semicolon (interface/abstract method)
+                            if (cleanSig.endsWith(';')) {
+                                isInterface = true;
+                                break;
+                            }
+                            // Check if it has an opening brace (has body, not interface)
+                            if (cleanSig.includes('{') || checkLine.includes('{')) {
+                                isInterface = false;
+                                break;
+                            }
+                            // If current line has semicolon after where clause or parameters
+                            const trimmedLine = checkLine.trim();
+                            if (trimmedLine.endsWith(';')) {
+                                isInterface = true;
+                                break;
+                            }
+                            // If the signature contains semicolon but no opening brace, it's an interface
+                            if (cleanSig.includes(';') && !cleanSig.includes('{')) {
+                                isInterface = true;
+                                break;
+                            }
+                            // Check next line if this one ends with where clause or generic constraint
+                            if (!trimmedLine.endsWith(';') && !trimmedLine.includes('{') &&
+                                (trimmedLine.includes('where') || k === j)) {
+                                // Continue looking
+                                continue;
+                            }
+                            // If we've looked at least one line after closing paren and found nothing, assume it has a body on next line
+                            if (k > j) {
+                                // We've checked at least one line after method signature start
+                                // If no semicolon or brace found yet, it's likely on a subsequent line
+                                // Continue checking
+                                continue;
+                            }
+                        }
+                    }
+
+                    // If we exited the loop after finding closing paren but without finding brace or semicolon,
+                    // check the final signature one more time
+                    if (foundClosingParen && !isInterface) {
+                        const finalClean = signature.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+                        if (finalClean.includes(';') && !finalClean.includes('{')) {
+                            isInterface = true;
+                        }
+                    }
+
                     methodDef = {
                         name: methodName,
                         namespace: '',
                         file: ref.uri.fsPath,
                         line: j,
                         character: methodNameIndex >= 0 ? methodNameIndex : 0,
-                        referenceLocations: [] // Initialize the reference locations array
+                        referenceLocations: [], // Initialize the reference locations array
+                        isInterface: isInterface // Mark if it's an interface method
                     };
 
                     // Find namespace for this method
@@ -889,7 +1048,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const refLocation = {
                     file: ref.uri.fsPath,
                     line: ref.range.start.line,
-                    character: ref.range.start.character
+                    character: ref.range.start.character,
+                    isReference: true
                 };
 
                 // Check if we've already found this method
@@ -963,7 +1123,8 @@ export function activate(context: vscode.ExtensionContext) {
                     outputChannel,
                     visited,
                     depth + 1,
-                    forceFileScan
+                    forceFileScan,
+                    methodDef.isInterface || false
                 );
 
                 if (parentResult && parentResult.tree.children.length > 0) {
@@ -974,7 +1135,14 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
 
-        const finalTree = { name: methodName, namespace: namespaceName, file: documentUri.fsPath, line: position.line, children: upstreamNodes };
+        const finalTree = {
+            name: methodName,
+            namespace: namespaceName,
+            file: documentUri.fsPath,
+            line: position.line,
+            children: upstreamNodes,
+            isInterface: isInterfaceMethod
+        };
         return { tree: finalTree, apiUsed };
     }
 
@@ -1349,7 +1517,6 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (lastSavedPath) {
             // Use last saved directory
-            vscode.window.showInformationMessage(`DEBUG Export: Using last saved path: ${lastSavedPath}`);
             const pathParts = lastSavedPath.split(/[/\\]/);
             pathParts.pop(); // Remove filename
             const lastDir = pathParts.join('/');
@@ -1385,7 +1552,6 @@ export function activate(context: vscode.ExtensionContext) {
             await vscode.workspace.fs.writeFile(uri, bytes);
             // Remember this save location
             context.workspaceState.update('lastUpstreamSavePath', uri.fsPath);
-            vscode.window.showInformationMessage(`DEBUG: Saved path to workspace state: ${uri.fsPath}`);
             vscode.window.showInformationMessage(`Tree exported to ${uri.fsPath}`);
         }
     });
@@ -1426,7 +1592,6 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Check for last saved path
             const lastSavedPath = context.workspaceState.get<string>('lastUpstreamSavePath');
-            vscode.window.showInformationMessage(`DEBUG Import: Last saved path from state: ${lastSavedPath || 'none'}`);
             if (lastSavedPath) {
                 try {
                     const lastUri = vscode.Uri.file(lastSavedPath);
@@ -1436,10 +1601,8 @@ export function activate(context: vscode.ExtensionContext) {
                     pathParts.pop(); // Remove filename
                     const dirPath = pathParts.join('/');
                     defaultUri = vscode.Uri.file(dirPath);
-                    vscode.window.showInformationMessage(`DEBUG Import: Using directory: ${dirPath}`);
                 } catch {
                     // File doesn't exist, fall through to next option
-                    vscode.window.showInformationMessage(`DEBUG Import: Last saved file doesn't exist, falling back`);
                 }
             }
 
@@ -1493,18 +1656,34 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             // Add imported trees to existing ones (don't clear)
+            let addedCount = 0;
+            let skippedCount = 0;
             importData.trees.forEach((tree: any) => {
-                treeDataProvider.addCallTree(tree);
-                // Restore checkbox states from the imported tree
-                treeDataProvider.restoreCheckboxStates(tree);
+                // Skip refresh during batch import - we'll refresh once at the end
+                const wasAdded = treeDataProvider.addCallTree(tree, true);
+                if (wasAdded) {
+                    addedCount++;
+                    // Restore checkbox states from the imported tree
+                    treeDataProvider.restoreCheckboxStates(tree);
+                } else {
+                    skippedCount++;
+                }
             });
 
             // Restore expanded nodes if present in the imported data
+            // Note: This will override auto-expanded state from addCallTree with the saved state
             if (importData.expandedNodes && Array.isArray(importData.expandedNodes)) {
                 treeDataProvider.restoreExpandedNodes(importData.expandedNodes);
+            } else {
+                // No saved expanded state, so just refresh to show the auto-expanded trees
+                treeDataProvider.refresh();
             }
 
-            vscode.window.showInformationMessage(`Added ${importData.trees.length} tree(s) from ${fileUri.fsPath}`);
+            if (skippedCount > 0) {
+                vscode.window.showInformationMessage(`Added ${addedCount} tree(s), skipped ${skippedCount} duplicate(s) from ${fileUri.fsPath}`);
+            } else {
+                vscode.window.showInformationMessage(`Added ${addedCount} tree(s) from ${fileUri.fsPath}`);
+            }
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to import file: ${error}`);
         }

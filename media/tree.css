@@ -44,7 +44,7 @@ body {
 }
 
 .indent-guide {
-    width: 16px;
+    width: 20px;
     position: relative;
     flex-shrink: 0;
     min-height: 22px;
@@ -53,10 +53,10 @@ body {
 .indent-guide::before {
     content: '';
     position: absolute;
-    left: 7px;
+    left: 9px;
     top: 0;
     bottom: 0;
-    width: 2px;
+    width: 1px;
     background-color: currentColor;
 }
 

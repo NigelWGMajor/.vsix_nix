@@ -42,8 +42,11 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 case 'checkboxToggle':
                     await this.handleCheckboxToggle(data.nodeIds);
                     break;
-                case 'expandCollapse':
-                    await this.handleExpandCollapse(data.nodeId);
+                case 'toggleExpand':
+                    await this.handleToggleExpand(data.nodeId);
+                    break;
+                case 'expandAll':
+                    await this.handleExpandAll(data.selectedNodes || []);
                     break;
                 case 'navigate':
                     await this.navigateToLocation(data.file, data.line, data.character);
@@ -57,13 +60,17 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 case 'selectRange':
                     await this.handleSelectRange(data.nodeIds);
                     break;
+                case 'removeSelected':
+                    await this.removeSelectedNodes();
+                    break;
+                case 'indent':
+                    await this.handleIndent(data.nodeIds || []);
+                    break;
+                case 'outdent':
+                    await this.handleOutdent(data.nodeIds || []);
+                    break;
                 case 'contextMenu':
                     await this.handleContextMenu(data.nodeId, data.node);
-                    break;
-                case 'syncExpanded':
-                    if (data.expandedNodes) {
-                        this.expandedNodes = new Set(data.expandedNodes);
-                    }
                     break;
             }
         });
@@ -113,15 +120,70 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
             this.checkedStates.set(nodeId, newState);
         });
 
+        // Send only checkbox state update, not full refresh
+        // This preserves the webview's expanded state
+        if (this._view) {
+            this._view.webview.postMessage({
+                type: 'updateCheckboxes',
+                checkedStates: Object.fromEntries(this.checkedStates)
+            });
+        }
+    }
+
+    private async handleToggleExpand(nodeId: string) {
+        // Toggle expand/collapse state - backend is source of truth
+        if (this.expandedNodes.has(nodeId)) {
+            this.expandedNodes.delete(nodeId);
+        } else {
+            this.expandedNodes.add(nodeId);
+        }
         this.refresh();
     }
 
-    private async handleExpandCollapse(nodeId: string) {
-        // Toggle expand/collapse state
-        this._view?.webview.postMessage({
-            type: 'toggleExpand',
-            nodeId: nodeId
-        });
+    private async handleExpandAll(selectedNodeIds: string[]) {
+        // Recursively find all nodes and add to expandedNodes
+        const addAllNodes = (node: any) => {
+            const nodeKey = this.getNodeKey(node);
+            const hasChildren = (node.children && node.children.length > 0) ||
+                              (node.referenceLocations && node.referenceLocations.length > 0);
+            if (hasChildren) {
+                this.expandedNodes.add(nodeKey);
+            }
+
+            if (node.referenceLocations) {
+                node.referenceLocations.forEach((ref: any) => addAllNodes(ref));
+            }
+            if (node.children) {
+                node.children.forEach((child: any) => addAllNodes(child));
+            }
+        };
+
+        // If nodes are selected, expand only those nodes and their descendants
+        if (selectedNodeIds.length > 0) {
+            const findAndExpandNode = (node: any): boolean => {
+                const nodeKey = this.getNodeKey(node);
+                if (selectedNodeIds.includes(nodeKey)) {
+                    addAllNodes(node);
+                    return true;
+                }
+
+                // Recursively check children
+                if (node.referenceLocations) {
+                    node.referenceLocations.forEach((ref: any) => findAndExpandNode(ref));
+                }
+                if (node.children) {
+                    node.children.forEach((child: any) => findAndExpandNode(child));
+                }
+                return false;
+            };
+
+            this.callTrees.forEach(tree => findAndExpandNode(tree));
+        } else {
+            // No selection - expand all nodes
+            this.callTrees.forEach(tree => addAllNodes(tree));
+        }
+
+        this.refresh();
     }
 
     private async navigateToLocation(file: string, line: number, character: number) {
@@ -137,6 +199,109 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         // Implement reordering logic
         // Find node, find parent, swap with sibling
         this.refresh();
+    }
+
+    private async handleIndent(nodeIds: string[]) {
+        if (nodeIds.length === 0) return;
+
+        // Indent means making selected nodes children of their previous sibling
+        const indented = new Set<string>();
+
+        const indentInArray = (nodes: any[]): any[] => {
+            const result: any[] = [];
+            let previousNode: any = null;
+
+            for (const node of nodes) {
+                const key = this.getNodeKey(node);
+
+                if (nodeIds.includes(key) && !node.isComment && previousNode && !indented.has(key)) {
+                    // Make this node a child of the previous node
+                    if (!previousNode.children) {
+                        previousNode.children = [];
+                    }
+                    previousNode.children.push(node);
+                    indented.add(key);
+                    // Don't add to result - it's now a child of previousNode
+                } else {
+                    // Process children recursively
+                    const newNode = { ...node };
+                    if (node.children) {
+                        newNode.children = indentInArray(node.children);
+                    }
+                    if (node.referenceLocations) {
+                        newNode.referenceLocations = indentInArray(node.referenceLocations);
+                    }
+                    result.push(newNode);
+                    previousNode = newNode;
+                }
+            }
+            return result;
+        };
+
+        this.callTrees = indentInArray(this.callTrees);
+        this.refresh();
+        vscode.window.showInformationMessage(`Indented ${indented.size} node(s)`);
+    }
+
+    private async handleOutdent(nodeIds: string[]) {
+        if (nodeIds.length === 0) return;
+
+        // Outdent means promoting selected nodes to be siblings of their parent
+        const outdented = new Set<string>();
+
+        const outdentInArray = (nodes: any[], parent: any = null): any[] => {
+            const result: any[] = [];
+
+            for (const node of nodes) {
+                const key = this.getNodeKey(node);
+                const newNode = { ...node };
+
+                // Process children first to check if any need to be outdented
+                const childrenToPromote: any[] = [];
+
+                if (node.children) {
+                    const processedChildren: any[] = [];
+                    for (const child of node.children) {
+                        const childKey = this.getNodeKey(child);
+                        if (nodeIds.includes(childKey) && !child.isComment && !outdented.has(childKey)) {
+                            // This child should be promoted to sibling
+                            childrenToPromote.push(child);
+                            outdented.add(childKey);
+                        } else {
+                            processedChildren.push(child);
+                        }
+                    }
+                    newNode.children = outdentInArray(processedChildren, node);
+                }
+
+                if (node.referenceLocations) {
+                    const processedRefs: any[] = [];
+                    for (const ref of node.referenceLocations) {
+                        const refKey = this.getNodeKey(ref);
+                        if (nodeIds.includes(refKey) && !ref.isComment && !outdented.has(refKey)) {
+                            childrenToPromote.push(ref);
+                            outdented.add(refKey);
+                        } else {
+                            processedRefs.push(ref);
+                        }
+                    }
+                    newNode.referenceLocations = outdentInArray(processedRefs, node);
+                }
+
+                result.push(newNode);
+
+                // Add promoted children right after this node
+                if (childrenToPromote.length > 0) {
+                    result.push(...childrenToPromote);
+                }
+            }
+
+            return result;
+        };
+
+        this.callTrees = outdentInArray(this.callTrees);
+        this.refresh();
+        vscode.window.showInformationMessage(`Outdented ${outdented.size} node(s)`);
     }
 
     private async handleSelectAll() {
@@ -167,6 +332,21 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 { label: '$(trash) Remove from Tree', description: 'Remove this node from the tree' }
             );
 
+            // If multiple nodes are selected, show options for bulk operations
+            if (this.selectedNodes.size > 1 && this.selectedNodes.has(nodeId)) {
+                items.push(
+                    { label: `$(trash) Remove ${this.selectedNodes.size} Selected Nodes`, description: 'Remove all selected nodes from the tree' },
+                    { label: `$(arrow-right) Indent ${this.selectedNodes.size} Selected Nodes`, description: 'Make nodes children of previous sibling' },
+                    { label: `$(arrow-left) Outdent ${this.selectedNodes.size} Selected Nodes`, description: 'Promote nodes to siblings of parent' }
+                );
+            } else {
+                // Single node operations
+                items.push(
+                    { label: '$(arrow-right) Indent', description: 'Make this node a child of previous sibling' },
+                    { label: '$(arrow-left) Outdent', description: 'Promote this node to sibling of parent' }
+                );
+            }
+
             if (!node.isReference) {
                 items.push(
                     { label: '$(search-fuzzy) Exhaustive Search', description: 'Search with file scan fallback' }
@@ -182,7 +362,6 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
             if (selected.label.includes('Add Comment')) {
                 // Increment numeric part of last comment for default
                 const defaultComment = this.getNextComment();
-                vscode.window.showInformationMessage(`DEBUG: lastComment="${this.lastComment}", defaultComment="${defaultComment}"`);
                 const comment = await vscode.window.showInputBox({
                     prompt: 'Enter comment text',
                     placeHolder: 'Comment...',
@@ -195,8 +374,6 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                         ? Array.from(this.selectedNodes)
                         : [nodeId];
 
-                    vscode.window.showInformationMessage(`DEBUG: selectedNodes.size=${this.selectedNodes.size}, has nodeId=${this.selectedNodes.has(nodeId)}, nodesToComment.length=${nodesToComment.length}`);
-
                     let successCount = 0;
                     for (const nId of nodesToComment) {
                         if (await this.insertCommentAboveNode(nId, comment)) {
@@ -204,7 +381,9 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                         }
                     }
 
-                    vscode.window.showInformationMessage(`Added comment to ${successCount} of ${nodesToComment.length} nodes`);
+                    if (nodesToComment.length > 1) {
+                        vscode.window.showInformationMessage(`Added comment to ${successCount} of ${nodesToComment.length} nodes`);
+                    }
                 }
             } else if (selected.label.includes('Edit Comment')) {
                 const newText = await vscode.window.showInputBox({
@@ -217,8 +396,23 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 }
             } else if (selected.label.includes('Delete Comment')) {
                 await this.deleteCommentNode(nodeId);
+            } else if (selected.label.includes('Remove') && selected.label.includes('Selected Nodes')) {
+                // Remove all selected nodes
+                await this.removeSelectedNodes();
             } else if (selected.label.includes('Remove from Tree')) {
                 await this.removeNode(nodeId);
+            } else if (selected.label.includes('Indent')) {
+                // Indent selected nodes or single node
+                const nodesToIndent = this.selectedNodes.size > 1 && this.selectedNodes.has(nodeId)
+                    ? Array.from(this.selectedNodes)
+                    : [nodeId];
+                await this.handleIndent(nodesToIndent);
+            } else if (selected.label.includes('Outdent')) {
+                // Outdent selected nodes or single node
+                const nodesToOutdent = this.selectedNodes.size > 1 && this.selectedNodes.has(nodeId)
+                    ? Array.from(this.selectedNodes)
+                    : [nodeId];
+                await this.handleOutdent(nodesToOutdent);
             } else if (selected.label.includes('Search Upstream')) {
                 if (node.file && typeof node.line === 'number') {
                     await vscode.commands.executeCommand('nixUpstreamCheck.searchUpstreamFromReference', {
@@ -264,14 +458,31 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
     public setCallTree(tree: any) {
         this.callTrees = [tree];
         // Ensure default expanded state for root
-        const rootKey = this.getNodeKey(tree);
         if (!this.expandedNodes) {
             this.expandedNodes = new Set();
         }
+
+        // Auto-expand all nodes in the tree
+        const expandTree = (node: any) => {
+            const nodeKey = this.getNodeKey(node);
+            const hasChildren = (node.children && node.children.length > 0) ||
+                              (node.referenceLocations && node.referenceLocations.length > 0);
+            if (hasChildren) {
+                this.expandedNodes.add(nodeKey);
+            }
+            if (node.children) {
+                node.children.forEach((child: any) => expandTree(child));
+            }
+            if (node.referenceLocations) {
+                node.referenceLocations.forEach((ref: any) => expandTree(ref));
+            }
+        };
+        expandTree(tree);
+
         this.refresh();
     }
 
-    public addCallTree(tree: any): boolean {
+    public addCallTree(tree: any, skipRefresh: boolean = false): boolean {
         const newKey = this.getNodeKey(tree);
         const isDuplicate = this.callTrees.some(existingTree => {
             return this.getNodeKey(existingTree) === newKey;
@@ -300,7 +511,9 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         };
         expandTree(tree);
 
-        this.refresh();
+        if (!skipRefresh) {
+            this.refresh();
+        }
         return true;
     }
 
@@ -312,11 +525,8 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
     }
 
     public expandAll() {
-        if (this._view) {
-            this._view.webview.postMessage({
-                type: 'expandAll'
-            });
-        }
+        // Expand all nodes - backend is source of truth
+        this.handleExpandAll([]);
     }
 
     public getCallTrees(): any[] {
@@ -328,14 +538,32 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
     }
 
     public restoreExpandedNodes(expandedNodeIds: string[]): void {
-        // Merge with existing expanded nodes instead of replacing
-        expandedNodeIds.forEach(id => this.expandedNodes.add(id));
+        // Replace expanded nodes entirely when importing
+        this.expandedNodes = new Set(expandedNodeIds);
         this.refresh();
     }
 
     public replaceLastTree(tree: any) {
         if (this.callTrees.length > 0) {
             this.callTrees[this.callTrees.length - 1] = tree;
+
+            // Auto-expand all nodes in the replaced tree
+            const expandTree = (node: any) => {
+                const nodeKey = this.getNodeKey(node);
+                const hasChildren = (node.children && node.children.length > 0) ||
+                                  (node.referenceLocations && node.referenceLocations.length > 0);
+                if (hasChildren) {
+                    this.expandedNodes.add(nodeKey);
+                }
+                if (node.children) {
+                    node.children.forEach((child: any) => expandTree(child));
+                }
+                if (node.referenceLocations) {
+                    node.referenceLocations.forEach((ref: any) => expandTree(ref));
+                }
+            };
+            expandTree(tree);
+
             this.refresh();
         }
     }
@@ -365,26 +593,68 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
     public pruneUncheckedItems(): number {
         let prunedCount = 0;
 
-        const pruneNode = (node: any): any | null => {
+        const pruneNode = (node: any): any[] => {
+            // Always keep comments regardless of checkbox state
+            if (node.isComment) {
+                return [node];
+            }
+
             const nodeKey = this.getNodeKey(node);
             const isChecked = this.checkedStates.get(nodeKey) !== false;
 
+            // If this node is unchecked, promote its checked children (and all comments)
             if (!isChecked) {
                 prunedCount++;
-                return null;
+                const promoted: any[] = [];
+
+                // Collect checked children, their descendants, and all comments
+                if (node.children) {
+                    for (const child of node.children) {
+                        promoted.push(...pruneNode(child));
+                    }
+                }
+                if (node.referenceLocations) {
+                    for (const ref of node.referenceLocations) {
+                        promoted.push(...pruneNode(ref));
+                    }
+                }
+
+                // Remove expanded state for this removed node
+                this.expandedNodes.delete(nodeKey);
+
+                return promoted; // Return children to be promoted to parent level
             }
 
+            // Node is checked, keep it but prune its children
+            const keptChildren: any[] = [];
             if (node.children) {
-                node.children = node.children.map((child: any) => pruneNode(child)).filter((c: any) => c !== null);
+                for (const child of node.children) {
+                    keptChildren.push(...pruneNode(child));
+                }
             }
             if (node.referenceLocations) {
-                node.referenceLocations = node.referenceLocations.map((ref: any) => pruneNode(ref)).filter((r: any) => r !== null);
+                for (const ref of node.referenceLocations) {
+                    keptChildren.push(...pruneNode(ref));
+                }
             }
 
-            return node;
+            // Split promoted children back into children and referenceLocations
+            // Comments always go into children
+            node.children = keptChildren.filter(n => !n.isReference || n.isComment);
+            node.referenceLocations = keptChildren.filter(n => n.isReference && !n.isComment);
+
+            return [node]; // Return array with this node
         };
 
-        this.callTrees = this.callTrees.map(tree => pruneNode(tree)).filter(t => t !== null);
+        const newTrees: any[] = [];
+        for (const tree of this.callTrees) {
+            newTrees.push(...pruneNode(tree));
+        }
+        this.callTrees = newTrees;
+
+        // Clean up expanded nodes that no longer exist in the tree
+        this.cleanupExpandedNodes();
+
         this.refresh();
         return prunedCount;
     }
@@ -447,47 +717,191 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
 
     private async editCommentNode(nodeId: string, newText: string): Promise<void> {
         // Find and edit comment
-        vscode.window.showInformationMessage('Comment editing will be implemented');
-        // TODO: Implement proper comment editing
+        const editComment = (nodes: any[]): boolean => {
+            for (const node of nodes) {
+                const key = this.getNodeKey(node);
+                if (key === nodeId && node.isComment) {
+                    node.commentText = newText;
+                    node.name = newText;
+                    return true;
+                }
+                // Recursively check children
+                if (node.children && editComment(node.children)) {
+                    return true;
+                }
+                if (node.referenceLocations && editComment(node.referenceLocations)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const success = editComment(this.callTrees);
+        if (success) {
+            this.refresh();
+            vscode.window.showInformationMessage('Comment updated');
+        } else {
+            vscode.window.showErrorMessage('Failed to update comment');
+        }
     }
 
     private async deleteCommentNode(nodeId: string): Promise<void> {
         // Find and delete comment
-        vscode.window.showInformationMessage('Comment deletion will be implemented');
-        // TODO: Implement proper comment deletion
-    }
-
-    private async removeNode(nodeId: string): Promise<void> {
-        vscode.window.showInformationMessage(`DEBUG: Removing node with ID: ${nodeId}`);
-        const beforeCount = this.callTrees.length;
-
-        // Find and remove node from tree
-        const removeFromTree = (nodes: any[]): any[] => {
+        const deleteComment = (nodes: any[]): any[] => {
             return nodes.filter(node => {
                 const key = this.getNodeKey(node);
-                if (key === nodeId) {
-                    vscode.window.showInformationMessage(`DEBUG: Found and removing node: ${node.name || 'unnamed'}`);
-                    return false; // Remove this node
+                if (key === nodeId && node.isComment) {
+                    return false; // Remove this comment
                 }
                 // Recursively check children
                 if (node.children) {
-                    node.children = removeFromTree(node.children);
+                    node.children = deleteComment(node.children);
                 }
                 if (node.referenceLocations) {
-                    node.referenceLocations = removeFromTree(node.referenceLocations);
+                    node.referenceLocations = deleteComment(node.referenceLocations);
                 }
                 return true; // Keep this node
             });
         };
 
-        this.callTrees = removeFromTree(this.callTrees);
-        const afterCount = this.callTrees.length;
-        vscode.window.showInformationMessage(`DEBUG: Tree count before=${beforeCount}, after=${afterCount}`);
-
+        this.callTrees = deleteComment(this.callTrees);
         this.checkedStates.delete(nodeId);
         this.selectedNodes.delete(nodeId);
         this.refresh();
-        vscode.window.showInformationMessage('Node removed from tree');
+        vscode.window.showInformationMessage('Comment deleted');
+    }
+
+    private async removeNode(nodeId: string): Promise<void> {
+        // Find and remove node from tree, promoting its children to siblings
+        // Comments are preserved - they stay at their current level
+        let nodeFound = false;
+
+        const removeFromTree = (nodes: any[]): any[] => {
+            const result: any[] = [];
+
+            for (const node of nodes) {
+                const key = this.getNodeKey(node);
+
+                if (key === nodeId && !node.isComment) {
+                    // Found the node to remove!
+                    nodeFound = true;
+
+                    // Promote all children to current level (make them siblings)
+                    // First, collect all children (both regular children and reference locations)
+                    const promotedNodes: any[] = [];
+                    if (node.children) {
+                        promotedNodes.push(...node.children);
+                    }
+                    if (node.referenceLocations) {
+                        promotedNodes.push(...node.referenceLocations);
+                    }
+
+                    // Add promoted nodes to result (they become siblings)
+                    result.push(...promotedNodes);
+
+                    // Remove expanded state for this removed node
+                    this.expandedNodes.delete(nodeId);
+
+                    // Don't add this node itself - it's been removed
+                } else {
+                    // Keep this node, but recursively process its children
+                    // Create a new node object to avoid mutation issues
+                    const newNode = { ...node };
+
+                    if (node.children && node.children.length > 0) {
+                        newNode.children = removeFromTree(node.children);
+                    }
+                    if (node.referenceLocations && node.referenceLocations.length > 0) {
+                        newNode.referenceLocations = removeFromTree(node.referenceLocations);
+                    }
+
+                    result.push(newNode);
+                }
+            }
+            return result;
+        };
+
+        this.callTrees = removeFromTree(this.callTrees);
+
+        if (nodeFound) {
+            this.checkedStates.delete(nodeId);
+            this.selectedNodes.delete(nodeId);
+
+            // Clean up expanded nodes that no longer exist in the tree
+            this.cleanupExpandedNodes();
+
+            this.refresh();
+            vscode.window.showInformationMessage('Node removed from tree');
+        } else {
+            vscode.window.showWarningMessage(`Could not find node with ID: ${nodeId}`);
+        }
+    }
+
+    private async removeSelectedNodes(): Promise<void> {
+        if (this.selectedNodes.size === 0) {
+            return;
+        }
+
+        const count = this.selectedNodes.size;
+        const nodeIdsToRemove = new Set(this.selectedNodes);
+
+        // Find and remove all selected nodes from tree, moving their children to siblings
+        // unless the children are also selected for removal
+        const removeFromTree = (nodes: any[]): any[] => {
+            const result: any[] = [];
+
+            for (const node of nodes) {
+                const key = this.getNodeKey(node);
+
+                if (nodeIdsToRemove.has(key) && !node.isComment) {
+                    // Only remove non-comment nodes
+                    // Collect children to promote (recursively process them first to handle nested removals)
+                    const promotedChildren: any[] = [];
+
+                    if (node.children && node.children.length > 0) {
+                        promotedChildren.push(...removeFromTree(node.children));
+                    }
+                    if (node.referenceLocations && node.referenceLocations.length > 0) {
+                        promotedChildren.push(...removeFromTree(node.referenceLocations));
+                    }
+
+                    // Remove expanded state for this removed node
+                    this.expandedNodes.delete(key);
+
+                    // Promote children to current level (make them siblings)
+                    result.push(...promotedChildren);
+                    // Don't add this node itself - it's been removed
+                } else {
+                    // Keep this node, but recursively process its children
+                    // Create a new node object to avoid mutation issues
+                    const newNode = { ...node };
+
+                    if (node.children && node.children.length > 0) {
+                        newNode.children = removeFromTree(node.children);
+                    }
+                    if (node.referenceLocations && node.referenceLocations.length > 0) {
+                        newNode.referenceLocations = removeFromTree(node.referenceLocations);
+                    }
+
+                    result.push(newNode);
+                }
+            }
+            return result;
+        };
+
+        this.callTrees = removeFromTree(this.callTrees);
+
+        // Clean up state
+        nodeIdsToRemove.forEach(nodeId => {
+            this.checkedStates.delete(nodeId);
+            this.selectedNodes.delete(nodeId);
+        });
+
+        // Clean up expanded nodes that no longer exist in the tree
+        this.cleanupExpandedNodes();
+
+        this.refresh();
+        vscode.window.showInformationMessage(`${count} nodes removed from tree`);
     }
 
     public insertCommentAbove(node: any, commentText: string): boolean {
@@ -627,9 +1041,40 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
             return `comment_${node.commentText}_${node.file || ''}_${node.line || 0}`;
         }
         if (node.isReference) {
-            return `ref_${node.file}_${node.line}_${node.character}_${node.referenceType || ''}`;
+            const char = node.character !== undefined ? node.character : 0;
+            return `ref_${node.file}_${node.line}_${char}_${node.referenceType || ''}`;
         }
         return `${node.namespace || ''}.${node.name}_${node.file || ''}_${node.line || 0}`;
+    }
+
+    private cleanupExpandedNodes(): void {
+        // Build a set of all valid node keys that exist in the current tree
+        const validNodeKeys = new Set<string>();
+
+        const collectNodeKeys = (node: any) => {
+            if (!node) return;
+            const nodeKey = this.getNodeKey(node);
+            validNodeKeys.add(nodeKey);
+
+            if (node.children) {
+                node.children.forEach((child: any) => collectNodeKeys(child));
+            }
+            if (node.referenceLocations) {
+                node.referenceLocations.forEach((ref: any) => collectNodeKeys(ref));
+            }
+        };
+
+        this.callTrees.forEach(tree => collectNodeKeys(tree));
+
+        // Remove expanded states for nodes that no longer exist
+        const expandedToRemove: string[] = [];
+        this.expandedNodes.forEach(nodeKey => {
+            if (!validNodeKeys.has(nodeKey)) {
+                expandedToRemove.push(nodeKey);
+            }
+        });
+
+        expandedToRemove.forEach(nodeKey => this.expandedNodes.delete(nodeKey));
     }
 
     public refresh() {

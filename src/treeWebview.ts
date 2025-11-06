@@ -199,17 +199,38 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         if (nodeIds.length === 0) return;
 
         // Reorder means swapping with adjacent siblings in the same array
+        // Comments immediately before nodes should move with them
         const nodeIdSet = new Set(nodeIds);
         let reordered = false;
 
         const reorderInArray = (nodes: any[]): any[] => {
-            // Find which nodes in this array need to be moved
-            const toMove: { index: number, node: any }[] = [];
-            nodes.forEach((node, index) => {
-                if (nodeIdSet.has(this.getNodeKey(node))) {
-                    toMove.push({ index, node });
+            // Find which nodes in this array need to be moved, including their preceding comments
+            const toMove: { startIndex: number, endIndex: number }[] = [];
+
+            for (let i = 0; i < nodes.length; i++) {
+                const node = nodes[i];
+                // Only process non-comment nodes as group anchors
+                // Comments will be included as part of the group with the node below them
+                if (!node.isComment && nodeIdSet.has(this.getNodeKey(node))) {
+                    // Found a non-comment node to move - walk backwards to include ALL consecutive comments
+                    let startIndex = i;
+                    while (startIndex > 0 && nodes[startIndex - 1].isComment) {
+                        startIndex--;
+                    }
+                    toMove.push({ startIndex, endIndex: i });
+                } else if (node.isComment && nodeIdSet.has(this.getNodeKey(node))) {
+                    // Comment is explicitly selected - check if it should move independently
+                    // Only add it if it's not already part of a group (i.e., the next node isn't selected)
+                    const nextIndex = i + 1;
+                    const nextIsSelected = nextIndex < nodes.length &&
+                                         !nodes[nextIndex].isComment &&
+                                         nodeIdSet.has(this.getNodeKey(nodes[nextIndex]));
+                    if (!nextIsSelected) {
+                        // This comment moves independently
+                        toMove.push({ startIndex: i, endIndex: i });
+                    }
                 }
-            });
+            }
 
             // If we found nodes to move at this level, reorder them
             if (toMove.length > 0) {
@@ -217,21 +238,43 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
 
                 if (direction === 'up') {
                     // Move up: process from first to last
-                    for (const { index } of toMove) {
-                        if (index > 0 && !nodeIdSet.has(this.getNodeKey(result[index - 1]))) {
-                            // Swap with previous sibling if it's not also selected
-                            [result[index - 1], result[index]] = [result[index], result[index - 1]];
-                            reordered = true;
+                    for (const { startIndex, endIndex } of toMove) {
+                        const groupSize = endIndex - startIndex + 1;
+
+                        // Can only move up if there's space and the previous element isn't part of another selected group
+                        if (startIndex > 0) {
+                            const prevIndex = startIndex - 1;
+                            // Check if previous node is part of a selected group
+                            const isPrevSelected = !nodes[prevIndex].isComment && nodeIdSet.has(this.getNodeKey(nodes[prevIndex]));
+
+                            if (!isPrevSelected) {
+                                // Move the entire group (comments + node) up by swapping with previous element
+                                const temp = result[prevIndex];
+                                result.splice(prevIndex, 1);
+                                result.splice(prevIndex + groupSize, 0, temp);
+                                reordered = true;
+                            }
                         }
                     }
                 } else {
                     // Move down: process from last to first
                     for (let i = toMove.length - 1; i >= 0; i--) {
-                        const { index } = toMove[i];
-                        if (index < result.length - 1 && !nodeIdSet.has(this.getNodeKey(result[index + 1]))) {
-                            // Swap with next sibling if it's not also selected
-                            [result[index], result[index + 1]] = [result[index + 1], result[index]];
-                            reordered = true;
+                        const { startIndex, endIndex } = toMove[i];
+                        const groupSize = endIndex - startIndex + 1;
+
+                        // Can only move down if there's space and the next element isn't part of another selected group
+                        if (endIndex < result.length - 1) {
+                            const nextIndex = endIndex + 1;
+                            // Check if next node is part of a selected group (or is a comment that belongs to a selected node)
+                            const isNextSelected = !nodes[nextIndex].isComment && nodeIdSet.has(this.getNodeKey(nodes[nextIndex]));
+
+                            if (!isNextSelected) {
+                                // Move the entire group (comments + node) down by swapping with next element
+                                const temp = result[nextIndex];
+                                result.splice(nextIndex, 1);
+                                result.splice(startIndex, 0, temp);
+                                reordered = true;
+                            }
                         }
                     }
                 }
@@ -274,7 +317,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
             for (const node of nodes) {
                 const key = this.getNodeKey(node);
 
-                if (nodeIds.includes(key) && !node.isComment && previousNode && !indented.has(key)) {
+                if (nodeIds.includes(key) && previousNode && !indented.has(key)) {
                     // Make this node a child of the previous node
                     if (!previousNode.children) {
                         previousNode.children = [];
@@ -323,7 +366,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                     const processedChildren: any[] = [];
                     for (const child of node.children) {
                         const childKey = this.getNodeKey(child);
-                        if (nodeIds.includes(childKey) && !child.isComment && !outdented.has(childKey)) {
+                        if (nodeIds.includes(childKey) && !outdented.has(childKey)) {
                             // This child should be promoted to sibling
                             childrenToPromote.push(child);
                             outdented.add(childKey);
@@ -338,7 +381,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                     const processedRefs: any[] = [];
                     for (const ref of node.referenceLocations) {
                         const refKey = this.getNodeKey(ref);
-                        if (nodeIds.includes(refKey) && !ref.isComment && !outdented.has(refKey)) {
+                        if (nodeIds.includes(refKey) && !outdented.has(refKey)) {
                             childrenToPromote.push(ref);
                             outdented.add(refKey);
                         } else {
@@ -395,15 +438,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
             // If multiple nodes are selected, show options for bulk operations
             if (this.selectedNodes.size > 1 && this.selectedNodes.has(nodeId)) {
                 items.push(
-                    { label: `$(trash) Remove ${this.selectedNodes.size} Selected Nodes`, description: 'Remove all selected nodes from the tree' },
-                    { label: `$(arrow-right) Indent ${this.selectedNodes.size} Selected Nodes`, description: 'Make nodes children of previous sibling' },
-                    { label: `$(arrow-left) Outdent ${this.selectedNodes.size} Selected Nodes`, description: 'Promote nodes to siblings of parent' }
-                );
-            } else {
-                // Single node operations
-                items.push(
-                    { label: '$(arrow-right) Indent', description: 'Make this node a child of previous sibling' },
-                    { label: '$(arrow-left) Outdent', description: 'Promote this node to sibling of parent' }
+                    { label: `$(trash) Remove ${this.selectedNodes.size} Selected Nodes`, description: 'Remove all selected nodes from the tree' }
                 );
             }
 
@@ -461,18 +496,6 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 await this.removeSelectedNodes();
             } else if (selected.label.includes('Remove from Tree')) {
                 await this.removeNode(nodeId);
-            } else if (selected.label.includes('Indent')) {
-                // Indent selected nodes or single node
-                const nodesToIndent = this.selectedNodes.size > 1 && this.selectedNodes.has(nodeId)
-                    ? Array.from(this.selectedNodes)
-                    : [nodeId];
-                await this.handleIndent(nodesToIndent);
-            } else if (selected.label.includes('Outdent')) {
-                // Outdent selected nodes or single node
-                const nodesToOutdent = this.selectedNodes.size > 1 && this.selectedNodes.has(nodeId)
-                    ? Array.from(this.selectedNodes)
-                    : [nodeId];
-                await this.handleOutdent(nodesToOutdent);
             } else if (selected.label.includes('Search Upstream')) {
                 if (node.file && typeof node.line === 'number') {
                     await vscode.commands.executeCommand('nixUpstreamCheck.searchUpstreamFromReference', {

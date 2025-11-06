@@ -52,7 +52,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                     await this.navigateToLocation(data.file, data.line, data.character);
                     break;
                 case 'reorder':
-                    await this.handleReorder(data.nodeId, data.direction);
+                    await this.handleReorder(data.nodeIds || [data.nodeId], data.direction);
                     break;
                 case 'selectAll':
                     await this.handleSelectAll();
@@ -195,10 +195,70 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         editor.revealRange(new vscode.Range(position, position));
     }
 
-    private async handleReorder(nodeId: string, direction: 'up' | 'down') {
-        // Implement reordering logic
-        // Find node, find parent, swap with sibling
-        this.refresh();
+    private async handleReorder(nodeIds: string[], direction: 'up' | 'down') {
+        if (nodeIds.length === 0) return;
+
+        // Reorder means swapping with adjacent siblings in the same array
+        const nodeIdSet = new Set(nodeIds);
+        let reordered = false;
+
+        const reorderInArray = (nodes: any[]): any[] => {
+            // Find which nodes in this array need to be moved
+            const toMove: { index: number, node: any }[] = [];
+            nodes.forEach((node, index) => {
+                if (nodeIdSet.has(this.getNodeKey(node))) {
+                    toMove.push({ index, node });
+                }
+            });
+
+            // If we found nodes to move at this level, reorder them
+            if (toMove.length > 0) {
+                const result = [...nodes];
+
+                if (direction === 'up') {
+                    // Move up: process from first to last
+                    for (const { index } of toMove) {
+                        if (index > 0 && !nodeIdSet.has(this.getNodeKey(result[index - 1]))) {
+                            // Swap with previous sibling if it's not also selected
+                            [result[index - 1], result[index]] = [result[index], result[index - 1]];
+                            reordered = true;
+                        }
+                    }
+                } else {
+                    // Move down: process from last to first
+                    for (let i = toMove.length - 1; i >= 0; i--) {
+                        const { index } = toMove[i];
+                        if (index < result.length - 1 && !nodeIdSet.has(this.getNodeKey(result[index + 1]))) {
+                            // Swap with next sibling if it's not also selected
+                            [result[index], result[index + 1]] = [result[index + 1], result[index]];
+                            reordered = true;
+                        }
+                    }
+                }
+
+                return result;
+            }
+
+            // Not found at this level, recurse into children
+            const result = nodes.map(node => {
+                const newNode = { ...node };
+                if (node.children) {
+                    newNode.children = reorderInArray(node.children);
+                }
+                if (node.referenceLocations) {
+                    newNode.referenceLocations = reorderInArray(node.referenceLocations);
+                }
+                return newNode;
+            });
+
+            return result;
+        };
+
+        this.callTrees = reorderInArray(this.callTrees);
+
+        if (reordered) {
+            this.refresh();
+        }
     }
 
     private async handleIndent(nodeIds: string[]) {

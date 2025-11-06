@@ -61,21 +61,33 @@
                 nodeIds: Array.from(selectedNodes)
             });
         } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.ctrlKey && !e.altKey && isFocused) {
-            // Arrow keys work on selected items when tree has focus
+            // Arrow Up/Down: reorder selected items when tree has focus
             if (selectedNodes.size >= 1) {
                 e.preventDefault();
-                // Move all selected nodes
-                const nodeIds = Array.from(selectedNodes);
-                nodeIds.forEach(nodeId => {
-                    vscode.postMessage({
-                        type: 'reorder',
-                        nodeId: nodeId,
-                        direction: e.key === 'ArrowUp' ? 'up' : 'down'
-                    });
+                // Move all selected nodes together
+                vscode.postMessage({
+                    type: 'reorder',
+                    nodeIds: Array.from(selectedNodes),
+                    direction: e.key === 'ArrowUp' ? 'up' : 'down'
+                });
+            }
+        } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.ctrlKey && !e.altKey && isFocused && selectedNodes.size > 0) {
+            // Arrow Left: outdent, Arrow Right: indent
+            e.preventDefault();
+            const nodeIds = Array.from(selectedNodes);
+            if (e.key === 'ArrowLeft') {
+                vscode.postMessage({
+                    type: 'outdent',
+                    nodeIds: nodeIds
+                });
+            } else {
+                vscode.postMessage({
+                    type: 'indent',
+                    nodeIds: nodeIds
                 });
             }
         } else if (e.key === 'Tab' && isFocused && selectedNodes.size > 0) {
-            // Tab to indent, Shift+Tab to outdent
+            // Tab to indent, Shift+Tab to outdent (alternative to arrow keys)
             e.preventDefault();
             const nodeIds = Array.from(selectedNodes);
             if (e.shiftKey) {
@@ -174,6 +186,11 @@
         if (hasChildren) {
             expandIcon.addEventListener('click', (e) => {
                 e.stopPropagation();
+                // Ensure tree container has focus
+                const treeContainer = document.getElementById('tree-container');
+                if (treeContainer) {
+                    treeContainer.focus();
+                }
                 toggleNodeExpansion(nodeKey);
             });
         }
@@ -188,6 +205,11 @@
             checkbox.dataset.nodeId = nodeKey; // Add nodeId to checkbox for debugging
             checkbox.addEventListener('click', (e) => {
                 e.stopPropagation();
+                // Ensure tree container has focus
+                const treeContainer = document.getElementById('tree-container');
+                if (treeContainer) {
+                    treeContainer.focus();
+                }
                 // If multiple nodes are selected AND this node is one of them, toggle all selected
                 // Otherwise, just toggle this checkbox
                 const nodesToToggle = selectedNodes.size > 1 && selectedNodes.has(nodeKey)
@@ -213,8 +235,14 @@
             nodeDiv.title = `${fileName}${lineInfo}\n${node.file}`;
         }
 
-        // Click handler for selection
+        // Click handler for selection (single-click only)
         nodeDiv.addEventListener('click', (e) => {
+            // Ensure tree container has focus for keyboard shortcuts
+            const treeContainer = document.getElementById('tree-container');
+            if (treeContainer) {
+                treeContainer.focus();
+            }
+
             const modifiers = {
                 ctrl: e.ctrlKey || e.metaKey,
                 shift: e.shiftKey
@@ -248,9 +276,12 @@
             }
 
             lastClickedNode = nodeKey;
+        });
 
-            // If has location, navigate (only on single click without modifiers)
-            if (!e.ctrlKey && !e.metaKey && !e.shiftKey && node.file && typeof node.line === 'number') {
+        // Double-click handler for navigation
+        nodeDiv.addEventListener('dblclick', (e) => {
+            // If has location, navigate
+            if (node.file && typeof node.line === 'number') {
                 vscode.postMessage({
                     type: 'navigate',
                     file: node.file,

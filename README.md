@@ -1,6 +1,6 @@
 # Nix Upstream Check - Method Caller Tracker
 
-A Visual Studio Code extension for C# developers that traces and visualizes all upstream method callers in an interactive tree view.
+A Visual Studio Code extension for C# developers to visualize upstream callers in an interactive tree view.
 
 ## tl;dr
 
@@ -10,8 +10,7 @@ Results are shown in a tree with
 
 - category indicators (Interface, Contoller, Orchestrator, Test ...)
 - informational tooltips
-- clickable link to location
-- clickable link to where referenced 📍
+- link to location or where referenced 📍 (double-click to navigate)
 - checkboxes for marking to-do or done ☑️
 - load and save as upstream.json files
 - manual additions and comments
@@ -19,21 +18,29 @@ Results are shown in a tree with
 
 ## Features
 
-- **Multi-strategy search**: Uses VS Code's Call Hierarchy API, CodeLens API, Reference Provider API, and optional file scanning
-- **Accurate results**: Finds exact call locations with line and character positions
-- **Auto-expands**: Automatically opens the tree view when you run a search
+- **Multi-strategy search**: Can use VS Code's Call Hierarchy API, CodeLens API, Reference Provider API, and optional file scanning (see settings)
+- **Navigation**: double-click to navigate in the codebase
+- **Checkboxes**: Mark items as done or to-do
 - **Category indicators**: Tags methods as Interface, Controller, Orchestrator, Test, etc. based on naming conventions and attributes
+- **Tree functions**: Expand, Collapse, Selective prune, move with arrows
+- **Persistence**: Save and load the tree as *.upstream.json files
+- **Markdown export**: Copy the tree as markdown to clipboard for documentation or sharing
+- **Manual additions**: Add arbitrary lines or comments to the tree
+- **Sticky Comments**: comments stick to the line when it is moved
+- **Restorable**: the tree can be rebuilt from the root to update
 
 ## Usage
 
 - **Build your C# project** (`dotnet build`) to ensure the language server has indexed your code
-- Ensure that the solution is fully loaded (and references are shown in the codelens tips)
+- Ensure that the solution is fully loaded (references are shown in the codelens tips)
 - **Place your cursor** on any C# method definition
 - **Right-click** and select **"Check Upstream"**
 - A messagebar will show the progress
 - The call tree will be shown in the sidebar
-- Clicking on a node will locate the item in your solution
+- Double-clicking on a node will navigate to the item in your solution
 - Right-click for context menu options
+- click to select, with shift for range, ctrl for multi-select
+- Use the arrow keys to move selected items up or down
 - Use the toolbar icons to
   - Add a link to the current selection
   - Expand the tree
@@ -46,7 +53,7 @@ Results are shown in a tree with
 ## Persistence
 
 If you save the treeview as xxx.upstream.json you can load it directly from the explorer by right-click `Load as Upstream Json` or double-clicking the file.
-the default folder is the workspace root, unless there is a.data folder there, in which case that will be preferred.
+The default folder for loading and saving is the workspace root, unless there is a `.data` folder there, in which case that will be used. Once a path has been chosen in a session it sticks.
 
 ## Requirements
 

@@ -312,6 +312,9 @@ class NixUpstreamTreeWebviewProvider {
                     }
                     previousNode.children.push(node);
                     indented.add(key);
+                    // Automatically expand the parent node so the indented child is visible
+                    const parentKey = this.getNodeKey(previousNode);
+                    this.expandedNodes.add(parentKey);
                     // Don't add to result - it's now a child of previousNode
                 }
                 else {

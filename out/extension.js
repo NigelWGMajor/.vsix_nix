@@ -287,12 +287,8 @@ function activate(context) {
             }
             return result.tree;
         });
-        if (apiUsedGlobal) {
-            vscode.window.showInformationMessage(`✅ Upstream search complete for ${methodName} (using ${apiUsedGlobal})`);
-        }
-        else {
-            vscode.window.showInformationMessage(`✅ Upstream search complete for ${methodName}`);
-        }
+        const sourceInfo = apiUsedGlobal ? ` (using ${apiUsedGlobal})` : '';
+        vscode.window.showInformationMessage(`✅ Upstream search complete for ${methodName}${sourceInfo}`);
     });
     context.subscriptions.push(disposable);
     // Manual fallback reference search when language server hasn't indexed yet
@@ -613,28 +609,36 @@ function activate(context) {
         // Try multiple APIs in priority order
         let references;
         let apiUsed = '';
+        // Get configuration settings
+        const config = vscode.workspace.getConfiguration('nixUpstreamCheck');
+        const enableCallHierarchy = config.get('enableCallHierarchy', false);
+        const enableCodeLens = config.get('enableCodeLens', false);
+        const enableReferenceProvider = config.get('enableReferenceProvider', true);
+        const enableFileScan = config.get('enableFileScan', false);
         // Strategy 1: Try Call Hierarchy API (best for finding callers)
-        try {
-            const callHierarchy = await vscode.commands.executeCommand('vscode.prepareCallHierarchy', documentUri, position);
-            if (callHierarchy && callHierarchy.length > 0) {
-                const incomingCalls = await vscode.commands.executeCommand('vscode.provideIncomingCalls', callHierarchy[0]);
-                if (incomingCalls && incomingCalls.length > 0) {
-                    references = incomingCalls.map((call) => {
-                        // Each incoming call has 'from' (the caller) and 'fromRanges' (call sites)
-                        const fromRange = call.fromRanges && call.fromRanges.length > 0
-                            ? call.fromRanges[0]
-                            : call.from.range;
-                        return new vscode.Location(call.from.uri, fromRange);
-                    });
-                    apiUsed = 'Call Hierarchy';
+        if (enableCallHierarchy) {
+            try {
+                const callHierarchy = await vscode.commands.executeCommand('vscode.prepareCallHierarchy', documentUri, position);
+                if (callHierarchy && callHierarchy.length > 0) {
+                    const incomingCalls = await vscode.commands.executeCommand('vscode.provideIncomingCalls', callHierarchy[0]);
+                    if (incomingCalls && incomingCalls.length > 0) {
+                        references = incomingCalls.map((call) => {
+                            // Each incoming call has 'from' (the caller) and 'fromRanges' (call sites)
+                            const fromRange = call.fromRanges && call.fromRanges.length > 0
+                                ? call.fromRanges[0]
+                                : call.from.range;
+                            return new vscode.Location(call.from.uri, fromRange);
+                        });
+                        apiUsed = 'Call Hierarchy';
+                    }
                 }
             }
-        }
-        catch (error) {
-            // Call Hierarchy not supported or failed - silently continue to next strategy
+            catch (error) {
+                // Call Hierarchy not supported or failed - silently continue to next strategy
+            }
         }
         // Strategy 2: Try CodeLens provider (this is what shows reference counts)
-        if (!references || references.length === 0) {
+        if (enableCodeLens && (!references || references.length === 0)) {
             try {
                 const codeLenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', documentUri);
                 if (codeLenses && codeLenses.length > 0) {
@@ -656,7 +660,7 @@ function activate(context) {
             }
         }
         // Strategy 3: Try standard Reference Provider
-        if (!references || references.length === 0) {
+        if (enableReferenceProvider && (!references || references.length === 0)) {
             try {
                 references = await vscode.commands.executeCommand('vscode.executeReferenceProvider', documentUri, position);
                 if (references && references.length > 0) {
@@ -670,8 +674,7 @@ function activate(context) {
         // Strategy 4: Manual file scan as last resort
         if (!references || references.length === 0) {
             // Check if file scan is enabled (either by configuration or forced)
-            const config = vscode.workspace.getConfiguration('nixUpstreamCheck');
-            const fileScanEnabled = forceFileScan || config.get('enableFileScanFallback', false);
+            const fileScanEnabled = forceFileScan || enableFileScan;
             if (fileScanEnabled) {
                 references = await manualReferenceSearch(methodName, documentUri, position);
                 apiUsed = 'File Scan (Fallback)';
@@ -1175,12 +1178,8 @@ function activate(context) {
             }
             return result.tree;
         });
-        if (apiUsedGlobal) {
-            vscode.window.showInformationMessage(`✅ Upstream search complete for ${enclosingMethod.name} (using ${apiUsedGlobal})`);
-        }
-        else {
-            vscode.window.showInformationMessage(`✅ Upstream search complete for ${enclosingMethod.name}`);
-        }
+        const sourceInfo = apiUsedGlobal ? ` (using ${apiUsedGlobal})` : '';
+        vscode.window.showInformationMessage(`✅ Upstream search complete for ${enclosingMethod.name}${sourceInfo}`);
     });
     context.subscriptions.push(searchUpstreamFromReferenceCommand);
     // Register command to expand all tree nodes

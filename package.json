@@ -189,6 +189,31 @@
           "name": ""
         }
       ]
+    },
+    "configuration": {
+      "title": "Nix Upstream Check",
+      "properties": {
+        "nixUpstreamCheck.enableCallHierarchy": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Call Hierarchy API for finding upstream references (highest priority, most accurate)"
+        },
+        "nixUpstreamCheck.enableCodeLens": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable CodeLens Provider for finding upstream references (medium priority)"
+        },
+        "nixUpstreamCheck.enableReferenceProvider": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Reference Provider for finding upstream references (lower priority)"
+        },
+        "nixUpstreamCheck.enableFileScan": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable manual file scanning as fallback when other methods fail (slowest but most thorough)"
+        }
+      }
     }
   },
   "scripts": {

@@ -324,6 +324,11 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                     }
                     previousNode.children.push(node);
                     indented.add(key);
+
+                    // Automatically expand the parent node so the indented child is visible
+                    const parentKey = this.getNodeKey(previousNode);
+                    this.expandedNodes.add(parentKey);
+
                     // Don't add to result - it's now a child of previousNode
                 } else {
                     // Process children recursively
@@ -702,7 +707,9 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                     }
                 }
 
-                // Remove expanded state for this removed node
+                // Clean up state for this removed node (children are being promoted)
+                this.checkedStates.delete(nodeKey);
+                this.selectedNodes.delete(nodeKey);
                 this.expandedNodes.delete(nodeKey);
 
                 return promoted; // Return children to be promoted to parent level
@@ -858,6 +865,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         // Find and remove node from tree, promoting its children to siblings
         // Comments are preserved - they stay at their current level
         let nodeFound = false;
+        let removedNode: any = null;
 
         const removeFromTree = (nodes: any[]): any[] => {
             const result: any[] = [];
@@ -868,6 +876,7 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 if (key === nodeId && !node.isComment) {
                     // Found the node to remove!
                     nodeFound = true;
+                    removedNode = node;
 
                     // Promote all children to current level (make them siblings)
                     // First, collect all children (both regular children and reference locations)
@@ -881,9 +890,6 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
 
                     // Add promoted nodes to result (they become siblings)
                     result.push(...promotedNodes);
-
-                    // Remove expanded state for this removed node
-                    this.expandedNodes.delete(nodeId);
 
                     // Don't add this node itself - it's been removed
                 } else {
@@ -906,9 +912,11 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
 
         this.callTrees = removeFromTree(this.callTrees);
 
-        if (nodeFound) {
+        if (nodeFound && removedNode) {
+            // Recursively clean up all state for the removed node (but not its promoted children)
             this.checkedStates.delete(nodeId);
             this.selectedNodes.delete(nodeId);
+            this.expandedNodes.delete(nodeId);
 
             // Clean up expanded nodes that no longer exist in the tree
             this.cleanupExpandedNodes();
@@ -948,7 +956,9 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                         promotedChildren.push(...removeFromTree(node.referenceLocations));
                     }
 
-                    // Remove expanded state for this removed node
+                    // Clean up state for this removed node only (children are promoted)
+                    this.checkedStates.delete(key);
+                    this.selectedNodes.delete(key);
                     this.expandedNodes.delete(key);
 
                     // Promote children to current level (make them siblings)
@@ -973,12 +983,6 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         };
 
         this.callTrees = removeFromTree(this.callTrees);
-
-        // Clean up state
-        nodeIdsToRemove.forEach(nodeId => {
-            this.checkedStates.delete(nodeId);
-            this.selectedNodes.delete(nodeId);
-        });
 
         // Clean up expanded nodes that no longer exist in the tree
         this.cleanupExpandedNodes();
@@ -1158,6 +1162,21 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         });
 
         expandedToRemove.forEach(nodeKey => this.expandedNodes.delete(nodeKey));
+    }
+
+    private recursivelyCleanupNodeState(node: any): void {
+        // Recursively clean up checkbox and selection states for this node and all descendants
+        const nodeKey = this.getNodeKey(node);
+        this.checkedStates.delete(nodeKey);
+        this.selectedNodes.delete(nodeKey);
+        this.expandedNodes.delete(nodeKey);
+
+        if (node.children) {
+            node.children.forEach((child: any) => this.recursivelyCleanupNodeState(child));
+        }
+        if (node.referenceLocations) {
+            node.referenceLocations.forEach((ref: any) => this.recursivelyCleanupNodeState(ref));
+        }
     }
 
     public refresh() {

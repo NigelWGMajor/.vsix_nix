@@ -570,7 +570,69 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         this.refresh();
     }
 
+    private addAsChildOfNode(nodeId: string, newChild: any): boolean {
+        // Recursively find the node and add the new item as its child
+        const findAndAddChild = (nodes: any[]): boolean => {
+            for (const node of nodes) {
+                const key = this.getNodeKey(node);
+
+                if (key === nodeId) {
+                    // Found the target node - add new item as child
+                    if (!node.children) {
+                        node.children = [];
+                    }
+
+                    // Check for duplicates in children
+                    const newKey = this.getNodeKey(newChild);
+                    const isDuplicate = node.children.some((child: any) =>
+                        this.getNodeKey(child) === newKey
+                    );
+
+                    if (!isDuplicate) {
+                        node.children.push(newChild);
+                        return true;
+                    }
+                    return false;
+                }
+
+                // Recursively check children
+                if (node.children && findAndAddChild(node.children)) {
+                    return true;
+                }
+                if (node.referenceLocations && findAndAddChild(node.referenceLocations)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        return findAndAddChild(this.callTrees);
+    }
+
     public addCallTree(tree: any, skipRefresh: boolean = false): boolean {
+        // If there's a selected node, add as child of that node
+        if (this.selectedNodes.size > 0) {
+            const selectedNodeId = Array.from(this.selectedNodes)[0]; // Get first selected node
+            const added = this.addAsChildOfNode(selectedNodeId, tree);
+            if (added) {
+                // Expand the parent node
+                this.expandedNodes.add(selectedNodeId);
+
+                // Select the newly added node
+                this.selectedNodes.clear();
+                const newNodeKey = this.getNodeKey(tree);
+                this.selectedNodes.add(newNodeKey);
+
+                if (!skipRefresh) {
+                    this.refresh();
+                    this.updateSelection();
+                }
+                return true;
+            }
+            // If adding as child failed, fall through to add at root level
+        }
+
+        // No selection or adding as child failed - add at root level
         const newKey = this.getNodeKey(tree);
         const isDuplicate = this.callTrees.some(existingTree => {
             return this.getNodeKey(existingTree) === newKey;
@@ -599,8 +661,13 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         };
         expandTree(tree);
 
+        // Select the newly added node
+        this.selectedNodes.clear();
+        this.selectedNodes.add(newKey);
+
         if (!skipRefresh) {
             this.refresh();
+            this.updateSelection();
         }
         return true;
     }

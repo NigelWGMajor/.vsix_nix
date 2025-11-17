@@ -86,6 +86,9 @@ class NixUpstreamTreeWebviewProvider {
                 case 'contextMenu':
                     await this.handleContextMenu(data.nodeId, data.node);
                     break;
+                case 'copyToClipboard':
+                    await this.handleCopyToClipboard(data.nodeId, data.node);
+                    break;
             }
         });
         // Handle visibility changes
@@ -479,6 +482,63 @@ class NixUpstreamTreeWebviewProvider {
                 }
             }
         }
+    }
+    async handleCopyToClipboard(nodeId, node) {
+        // Generate the visible text for this node
+        let text = '';
+        if (node.isComment) {
+            text = `👇 ${node.commentText || node.name || ''}`;
+        }
+        else if (node.isReference) {
+            text = node.name || `📍 ${(node.file || '').split(/[/\\]/).pop()}:${(node.line || 0) + 1}`;
+        }
+        else {
+            // Method or class node
+            if (node.isClass) {
+                text = `c ${node.name || ''}`;
+            }
+            else {
+                const typeIndicator = this.getTypeIndicator(node);
+                text = `${typeIndicator} ${node.name || ''}`;
+                if (node.httpAttribute) {
+                    text += ` [${node.httpAttribute}]`;
+                }
+            }
+        }
+        // Copy to clipboard
+        await vscode.env.clipboard.writeText(text);
+        vscode.window.showInformationMessage(`Copied to clipboard: ${text}`);
+    }
+    getTypeIndicator(node) {
+        // Check file name for patterns
+        const fileName = (node.file || '').toLowerCase();
+        let typeChar = '';
+        // Check for test first (as test files might also contain 'controller', 'service', etc.)
+        if (fileName.includes('test')) {
+            typeChar = '𝐓';
+        }
+        else if (fileName.includes('orchestrator')) {
+            typeChar = '𝐎';
+        }
+        else if (fileName.includes('controller')) {
+            typeChar = '𝐂';
+        }
+        else if (fileName.includes('service')) {
+            typeChar = '𝐒';
+        }
+        else if (fileName.includes('repository')) {
+            typeChar = '𝐑';
+        }
+        else {
+            // Default to M for methods if no specific pattern matched
+            typeChar = '𝐌';
+        }
+        // If the node is an interface method (no body), prepend 𝐈
+        if (node.isInterface) {
+            // Combine: 𝐈 + type character (e.g., 𝐈𝐎 for interface in orchestrator)
+            return '𝐈' + typeChar;
+        }
+        return typeChar;
     }
     updateSelection() {
         this._view?.webview.postMessage({

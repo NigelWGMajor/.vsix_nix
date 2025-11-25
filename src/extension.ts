@@ -1571,20 +1571,12 @@ export function activate(context: vscode.ExtensionContext) {
         const lastPath = await getLastUpstreamFilePath();
 
         if (lastPath) {
-            const candidatePath = incrementTrailingNumber(lastPath);
-            const candidateDir = path.dirname(candidatePath);
-
+            const lastDir = path.dirname(lastPath);
             try {
-                await vscode.workspace.fs.stat(vscode.Uri.file(candidateDir));
-                return vscode.Uri.file(candidatePath);
+                await vscode.workspace.fs.stat(vscode.Uri.file(lastDir));
+                return vscode.Uri.file(lastDir);
             } catch {
-                const dir = path.dirname(lastPath);
-                try {
-                    await vscode.workspace.fs.stat(vscode.Uri.file(dir));
-                    return vscode.Uri.file(dir);
-                } catch {
-                    // Fall through to workspace defaults
-                }
+                // Fall through to workspace defaults if the previous folder no longer exists
             }
         }
 

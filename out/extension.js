@@ -26,6 +26,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.deactivate = exports.activate = void 0;
 // Entry point for the Nix Upstream Check extension
 const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
 const treeWebview_1 = require("./treeWebview");
 function activate(context) {
     // Create output channel for diagnostics
@@ -1242,6 +1243,90 @@ function activate(context) {
         }
     });
     context.subscriptions.push(deleteCommentCommand);
+    // Helpers to manage default file locations for upstream JSON import/export
+    const rememberLastUpstreamFilePath = (filePath) => {
+        context.workspaceState.update('lastUpstreamFilePath', filePath);
+    };
+    const getLastUpstreamFilePath = async () => {
+        const lastPath = context.workspaceState.get('lastUpstreamFilePath');
+        if (lastPath) {
+            return lastPath;
+        }
+        // Migrate legacy state key if present
+        const legacyPath = context.workspaceState.get('lastUpstreamSavePath');
+        if (legacyPath) {
+            await context.workspaceState.update('lastUpstreamFilePath', legacyPath);
+        }
+        return legacyPath;
+    };
+    const getPreferredWorkspaceFolder = async () => {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+            const workspaceRoot = workspaceFolders[0].uri;
+            const dataFolder = vscode.Uri.joinPath(workspaceRoot, '.data');
+            try {
+                await vscode.workspace.fs.stat(dataFolder);
+                return dataFolder;
+            }
+            catch {
+                return workspaceRoot;
+            }
+        }
+        return undefined;
+    };
+    const incrementTrailingNumber = (filePath) => {
+        const dir = path.dirname(filePath);
+        const filename = path.basename(filePath);
+        const match = filename.match(/^(.*?)(\d+)(\.[^.]+(?:\.[^.]+)*)?$/);
+        if (!match) {
+            return filePath;
+        }
+        const [, prefix, number, ext] = match;
+        const incremented = (parseInt(number, 10) + 1).toString().padStart(number.length, '0');
+        const newName = `${prefix}${incremented}${ext ?? ''}`;
+        return dir === '.' ? newName : path.join(dir, newName);
+    };
+    const getDefaultSaveUri = async (defaultName) => {
+        const lastPath = await getLastUpstreamFilePath();
+        if (lastPath) {
+            const candidatePath = incrementTrailingNumber(lastPath);
+            const candidateDir = path.dirname(candidatePath);
+            try {
+                await vscode.workspace.fs.stat(vscode.Uri.file(candidateDir));
+                return vscode.Uri.file(candidatePath);
+            }
+            catch {
+                // Fall through to workspace defaults if directory is missing
+            }
+        }
+        const workspaceFolder = await getPreferredWorkspaceFolder();
+        if (workspaceFolder) {
+            return vscode.Uri.joinPath(workspaceFolder, defaultName);
+        }
+        return vscode.Uri.file(defaultName);
+    };
+    const getDefaultOpenUri = async () => {
+        const lastPath = await getLastUpstreamFilePath();
+        if (lastPath) {
+            const candidatePath = incrementTrailingNumber(lastPath);
+            const candidateDir = path.dirname(candidatePath);
+            try {
+                await vscode.workspace.fs.stat(vscode.Uri.file(candidateDir));
+                return vscode.Uri.file(candidatePath);
+            }
+            catch {
+                const dir = path.dirname(lastPath);
+                try {
+                    await vscode.workspace.fs.stat(vscode.Uri.file(dir));
+                    return vscode.Uri.file(dir);
+                }
+                catch {
+                    // Fall through to workspace defaults
+                }
+            }
+        }
+        return await getPreferredWorkspaceFolder();
+    };
     // Register command to export tree as JSON
     let exportJsonCommand = vscode.commands.registerCommand('nixUpstreamCheck.exportJson', async () => {
         const trees = treeDataProvider.getCallTrees();
@@ -1257,34 +1342,7 @@ function activate(context) {
         // Use the first tree's root member name as default filename
         const firstTree = trees[0];
         const defaultName = firstTree.name ? `${firstTree.name}.upstream.json` : 'upstream-references.upstream.json';
-        // Get last saved location from workspace state, or use .data folder
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        let defaultUri;
-        const lastSavedPath = context.workspaceState.get('lastUpstreamSavePath');
-        if (lastSavedPath) {
-            // Use last saved directory
-            const pathParts = lastSavedPath.split(/[/\\]/);
-            pathParts.pop(); // Remove filename
-            const lastDir = pathParts.join('/');
-            defaultUri = vscode.Uri.file(lastDir + '/' + defaultName);
-        }
-        else if (workspaceFolders && workspaceFolders.length > 0) {
-            const workspaceRoot = workspaceFolders[0].uri;
-            const dataFolder = vscode.Uri.joinPath(workspaceRoot, '.data');
-            // Check if .data folder exists
-            try {
-                await vscode.workspace.fs.stat(dataFolder);
-                // .data exists, use it
-                defaultUri = vscode.Uri.joinPath(dataFolder, defaultName);
-            }
-            catch {
-                // .data doesn't exist, use workspace root
-                defaultUri = vscode.Uri.joinPath(workspaceRoot, defaultName);
-            }
-        }
-        else {
-            defaultUri = vscode.Uri.file(defaultName);
-        }
+        const defaultUri = await getDefaultSaveUri(defaultName);
         const jsonContent = JSON.stringify(exportData, null, 2);
         const uri = await vscode.window.showSaveDialog({
             defaultUri: defaultUri,
@@ -1297,7 +1355,7 @@ function activate(context) {
             }
             await vscode.workspace.fs.writeFile(uri, bytes);
             // Remember this save location
-            context.workspaceState.update('lastUpstreamSavePath', uri.fsPath);
+            rememberLastUpstreamFilePath(uri.fsPath);
             vscode.window.showInformationMessage(`Tree exported to ${uri.fsPath}`);
         }
     });
@@ -1326,38 +1384,7 @@ function activate(context) {
         // If URI is provided (from file explorer click), use it; otherwise show file picker
         let fileUri = uri;
         if (!fileUri) {
-            // Get default directory for import dialog
-            // Priority: last saved path > .data folder > workspace root
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            let defaultUri;
-            // Check for last saved path
-            const lastSavedPath = context.workspaceState.get('lastUpstreamSavePath');
-            if (lastSavedPath) {
-                try {
-                    const lastUri = vscode.Uri.file(lastSavedPath);
-                    await vscode.workspace.fs.stat(lastUri);
-                    // File exists, use its directory
-                    const pathParts = lastSavedPath.split(/[/\\]/);
-                    pathParts.pop(); // Remove filename
-                    const dirPath = pathParts.join('/');
-                    defaultUri = vscode.Uri.file(dirPath);
-                }
-                catch {
-                    // File doesn't exist, fall through to next option
-                }
-            }
-            if (!defaultUri && workspaceFolders && workspaceFolders.length > 0) {
-                // Check if .data folder exists in workspace root
-                const dataFolderUri = vscode.Uri.joinPath(workspaceFolders[0].uri, '.data');
-                try {
-                    await vscode.workspace.fs.stat(dataFolderUri);
-                    defaultUri = dataFolderUri;
-                }
-                catch {
-                    // .data doesn't exist, use workspace root
-                    defaultUri = workspaceFolders[0].uri;
-                }
-            }
+            const defaultUri = await getDefaultOpenUri();
             const result = await vscode.window.showOpenDialog({
                 canSelectFiles: true,
                 canSelectFolders: false,
@@ -1379,6 +1406,7 @@ function activate(context) {
                 vscode.window.showErrorMessage('Invalid file path selected.');
                 return;
             }
+            rememberLastUpstreamFilePath(fileUri.fsPath);
             const fileContent = await vscode.workspace.fs.readFile(fileUri);
             // Convert Uint8Array to string
             let jsonContent = '';

@@ -86,9 +86,6 @@ class NixUpstreamTreeWebviewProvider {
                 case 'contextMenu':
                     await this.handleContextMenu(data.nodeId, data.node);
                     break;
-                case 'copyToClipboard':
-                    await this.handleCopyToClipboard(data.nodeId, data.node);
-                    break;
             }
         });
         // Handle visibility changes
@@ -405,6 +402,8 @@ class NixUpstreamTreeWebviewProvider {
     }
     async handleContextMenu(nodeId, node) {
         const items = [];
+        // Add Copy to Clipboard option at the top for all node types
+        items.push({ label: '$(clippy) Copy to Clipboard', description: 'Copy node text to clipboard' });
         if (node.isComment) {
             items.push({ label: '$(edit) Edit Comment', description: 'Edit this comment' }, { label: '$(trash) Delete Comment', description: 'Remove this comment' });
         }
@@ -422,7 +421,10 @@ class NixUpstreamTreeWebviewProvider {
             placeHolder: 'Select action'
         });
         if (selected) {
-            if (selected.label.includes('Add Comment')) {
+            if (selected.label.includes('Copy to Clipboard')) {
+                await this.handleCopyToClipboard(nodeId, node);
+            }
+            else if (selected.label.includes('Add Comment')) {
                 // Increment numeric part of last comment for default
                 const defaultComment = this.getNextComment();
                 const comment = await vscode.window.showInputBox({

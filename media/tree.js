@@ -294,77 +294,13 @@
         // Context menu handler
         nodeDiv.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-
-            // Create a simple context menu for copy action
-            const menu = document.createElement('div');
-            menu.className = 'context-menu';
-            menu.style.position = 'fixed';
-            menu.style.left = e.clientX + 'px';
-            menu.style.top = e.clientY + 'px';
-            menu.style.backgroundColor = 'var(--vscode-menu-background)';
-            menu.style.border = '1px solid var(--vscode-menu-border)';
-            menu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)';
-            menu.style.zIndex = '10000';
-            menu.style.minWidth = '150px';
-
-            const copyItem = document.createElement('div');
-            copyItem.textContent = 'Copy to Clipboard';
-            copyItem.style.padding = '4px 8px';
-            copyItem.style.cursor = 'pointer';
-            copyItem.style.color = 'var(--vscode-menu-foreground)';
-            copyItem.addEventListener('mouseenter', () => {
-                copyItem.style.backgroundColor = 'var(--vscode-menu-selectionBackground)';
+            vscode.postMessage({
+                type: 'contextMenu',
+                nodeId: nodeKey,
+                node: node,
+                x: e.clientX,
+                y: e.clientY
             });
-            copyItem.addEventListener('mouseleave', () => {
-                copyItem.style.backgroundColor = 'transparent';
-            });
-            copyItem.addEventListener('click', () => {
-                vscode.postMessage({
-                    type: 'copyToClipboard',
-                    nodeId: nodeKey,
-                    node: node
-                });
-                document.body.removeChild(menu);
-            });
-
-            const moreItem = document.createElement('div');
-            moreItem.textContent = 'More...';
-            moreItem.style.padding = '4px 8px';
-            moreItem.style.cursor = 'pointer';
-            moreItem.style.color = 'var(--vscode-menu-foreground)';
-            moreItem.addEventListener('mouseenter', () => {
-                moreItem.style.backgroundColor = 'var(--vscode-menu-selectionBackground)';
-            });
-            moreItem.addEventListener('mouseleave', () => {
-                moreItem.style.backgroundColor = 'transparent';
-            });
-            moreItem.addEventListener('click', () => {
-                vscode.postMessage({
-                    type: 'contextMenu',
-                    nodeId: nodeKey,
-                    node: node,
-                    x: e.clientX,
-                    y: e.clientY
-                });
-                document.body.removeChild(menu);
-            });
-
-            menu.appendChild(copyItem);
-            menu.appendChild(moreItem);
-            document.body.appendChild(menu);
-
-            // Close menu when clicking anywhere else
-            const closeMenu = (event) => {
-                if (!menu.contains(event.target)) {
-                    if (document.body.contains(menu)) {
-                        document.body.removeChild(menu);
-                    }
-                    document.removeEventListener('click', closeMenu);
-                }
-            };
-            setTimeout(() => {
-                document.addEventListener('click', closeMenu);
-            }, 0);
         });
 
         nodeDiv.appendChild(label);

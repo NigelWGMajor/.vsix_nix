@@ -72,9 +72,6 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 case 'contextMenu':
                     await this.handleContextMenu(data.nodeId, data.node);
                     break;
-                case 'copyToClipboard':
-                    await this.handleCopyToClipboard(data.nodeId, data.node);
-                    break;
             }
         });
 
@@ -431,6 +428,11 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
     private async handleContextMenu(nodeId: string, node: any) {
         const items: vscode.QuickPickItem[] = [];
 
+        // Add Copy to Clipboard option at the top for all node types
+        items.push(
+            { label: '$(clippy) Copy to Clipboard', description: 'Copy node text to clipboard' }
+        );
+
         if (node.isComment) {
             items.push(
                 { label: '$(edit) Edit Comment', description: 'Edit this comment' },
@@ -462,7 +464,9 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         });
 
         if (selected) {
-            if (selected.label.includes('Add Comment')) {
+            if (selected.label.includes('Copy to Clipboard')) {
+                await this.handleCopyToClipboard(nodeId, node);
+            } else if (selected.label.includes('Add Comment')) {
                 // Increment numeric part of last comment for default
                 const defaultComment = this.getNextComment();
                 const comment = await vscode.window.showInputBox({

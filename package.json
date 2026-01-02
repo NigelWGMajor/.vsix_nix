@@ -2,7 +2,7 @@
   "name": "nix-upstream-check",
   "displayName": "Nix Upstream Check",
   "description": "Find all upstream references to a C# function and display the call tree.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "NigelWGMajor",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -17,7 +17,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:csharp"
+    "onLanguage:csharp",
+    "onCommand:nixUpstreamCheck.insertToUpstreamTree"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -65,8 +66,8 @@
         "icon": "$(folder-opened)"
       },
       {
-        "command": "nixUpstreamCheck.addCurrentLine",
-        "title": "Add Current Line",
+        "command": "nixUpstreamCheck.insertToUpstreamTree",
+        "title": "Insert to Upstream Tree",
         "icon": "$(add)"
       },
       {
@@ -93,6 +94,11 @@
           "command": "nixUpstreamCheck.start",
           "when": "editorLangId == csharp",
           "group": "navigation@100"
+        },
+        {
+          "command": "nixUpstreamCheck.insertToUpstreamTree",
+          "when": "editorTextFocus",
+          "group": "navigation@101"
         }
       ],
       "view/item/context": [
@@ -129,7 +135,7 @@
       ],
       "view/title": [
         {
-          "command": "nixUpstreamCheck.addCurrentLine",
+          "command": "nixUpstreamCheck.insertToUpstreamTree",
           "when": "view == nixUpstreamCheckTree",
           "group": "navigation@1"
         },
@@ -226,5 +232,8 @@
     "@vscode/vsce": "^3.6.2",
     "tslint": "^6.1.3",
     "typescript": "^4.8.0"
+  },
+  "dependencies": {
+    "vsce": "^2.15.0"
   }
 }

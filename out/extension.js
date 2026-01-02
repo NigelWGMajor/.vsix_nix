@@ -1308,21 +1308,13 @@ function activate(context) {
     const getDefaultOpenUri = async () => {
         const lastPath = await getLastUpstreamFilePath();
         if (lastPath) {
-            const candidatePath = incrementTrailingNumber(lastPath);
-            const candidateDir = path.dirname(candidatePath);
+            const lastDir = path.dirname(lastPath);
             try {
-                await vscode.workspace.fs.stat(vscode.Uri.file(candidateDir));
-                return vscode.Uri.file(candidatePath);
+                await vscode.workspace.fs.stat(vscode.Uri.file(lastDir));
+                return vscode.Uri.file(lastDir);
             }
             catch {
-                const dir = path.dirname(lastPath);
-                try {
-                    await vscode.workspace.fs.stat(vscode.Uri.file(dir));
-                    return vscode.Uri.file(dir);
-                }
-                catch {
-                    // Fall through to workspace defaults
-                }
+                // Fall through to workspace defaults if the previous folder no longer exists
             }
         }
         return await getPreferredWorkspaceFolder();
@@ -1465,8 +1457,8 @@ function activate(context) {
         }
     });
     context.subscriptions.push(textDocumentListener);
-    // Register command to add current line as a simple item (no upstream search)
-    let addCurrentLineCommand = vscode.commands.registerCommand('nixUpstreamCheck.addCurrentLine', async () => {
+    // Register command to insert the current line into the upstream tree without a search
+    let insertToUpstreamTreeCommand = vscode.commands.registerCommand('nixUpstreamCheck.insertToUpstreamTree', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showWarningMessage('No active editor.');
@@ -1553,7 +1545,7 @@ function activate(context) {
             vscode.window.showWarningMessage(`"${itemName}" could not be added (may already exist).`);
         }
     });
-    context.subscriptions.push(addCurrentLineCommand);
+    context.subscriptions.push(insertToUpstreamTreeCommand);
     // Command to remove a node from the tree
     let removeNodeCommand = vscode.commands.registerCommand('nixUpstreamCheck.removeNode', async (node) => {
         if (!node || !node.treeData) {

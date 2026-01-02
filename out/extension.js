@@ -1457,8 +1457,8 @@ function activate(context) {
         }
     });
     context.subscriptions.push(textDocumentListener);
-    // Register command to add current line as a simple item (no upstream search)
-    let addCurrentLineCommand = vscode.commands.registerCommand('nixUpstreamCheck.addCurrentLine', async () => {
+    // Register command to insert the current line into the upstream tree without a search
+    let insertToUpstreamTreeCommand = vscode.commands.registerCommand('nixUpstreamCheck.insertToUpstreamTree', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showWarningMessage('No active editor.');
@@ -1545,7 +1545,7 @@ function activate(context) {
             vscode.window.showWarningMessage(`"${itemName}" could not be added (may already exist).`);
         }
     });
-    context.subscriptions.push(addCurrentLineCommand);
+    context.subscriptions.push(insertToUpstreamTreeCommand);
     // Command to remove a node from the tree
     let removeNodeCommand = vscode.commands.registerCommand('nixUpstreamCheck.removeNode', async (node) => {
         if (!node || !node.treeData) {

@@ -86,6 +86,16 @@
       {
         "command": "nixUpstreamCheck.deleteComment",
         "title": "Delete Comment"
+      },
+      {
+        "command": "nixUpstreamCheck.toggleAutoFocus",
+        "title": "Toggle Auto-Focus: Currently Enabled (Nested)",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "nixUpstreamCheck.toggleAutoFocusOff",
+        "title": "Toggle Auto-Focus: Currently Disabled (Sibling)",
+        "icon": "$(arrow-down)"
       }
     ],
     "menus": {
@@ -134,6 +144,16 @@
         }
       ],
       "view/title": [
+        {
+          "command": "nixUpstreamCheck.toggleAutoFocus",
+          "when": "view == nixUpstreamCheckTree && nixUpstreamCheck.autoFocusEnabled",
+          "group": "navigation@0"
+        },
+        {
+          "command": "nixUpstreamCheck.toggleAutoFocusOff",
+          "when": "view == nixUpstreamCheckTree && !nixUpstreamCheck.autoFocusEnabled",
+          "group": "navigation@0"
+        },
         {
           "command": "nixUpstreamCheck.insertToUpstreamTree",
           "when": "view == nixUpstreamCheckTree",

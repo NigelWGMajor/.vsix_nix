@@ -8,11 +8,15 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
     private selectedNodes: Set<string> = new Set();
     private expandedNodes: Set<string> = new Set();
     private lastComment: string = '';
+    private autoFocusNewItems: boolean = true; // Toggle for auto-focusing new items
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
         private readonly _context: vscode.ExtensionContext
-    ) {}
+    ) {
+        // Load the auto-focus state from context
+        this.autoFocusNewItems = this._context.globalState.get('nixUpstreamCheck.autoFocusNewItems', true);
+    }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -681,10 +685,12 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
                 // Expand the parent node
                 this.expandedNodes.add(selectedNodeId);
 
-                // Select the newly added node
-                this.selectedNodes.clear();
-                const newNodeKey = this.getNodeKey(tree);
-                this.selectedNodes.add(newNodeKey);
+                // Select the newly added node only if autoFocusNewItems is enabled
+                if (this.autoFocusNewItems) {
+                    this.selectedNodes.clear();
+                    const newNodeKey = this.getNodeKey(tree);
+                    this.selectedNodes.add(newNodeKey);
+                }
 
                 if (!skipRefresh) {
                     this.refresh();
@@ -724,9 +730,11 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         };
         expandTree(tree);
 
-        // Select the newly added node
-        this.selectedNodes.clear();
-        this.selectedNodes.add(newKey);
+        // Select the newly added node only if autoFocusNewItems is enabled
+        if (this.autoFocusNewItems) {
+            this.selectedNodes.clear();
+            this.selectedNodes.add(newKey);
+        }
 
         if (!skipRefresh) {
             this.refresh();
@@ -740,6 +748,17 @@ export class NixUpstreamTreeWebviewProvider implements vscode.WebviewViewProvide
         this.checkedStates.clear();
         this.selectedNodes.clear();
         this.refresh();
+    }
+
+    public toggleAutoFocus(): boolean {
+        this.autoFocusNewItems = !this.autoFocusNewItems;
+        // Save the state to context
+        this._context.globalState.update('nixUpstreamCheck.autoFocusNewItems', this.autoFocusNewItems);
+        return this.autoFocusNewItems;
+    }
+
+    public getAutoFocusState(): boolean {
+        return this.autoFocusNewItems;
     }
 
     public expandAll() {

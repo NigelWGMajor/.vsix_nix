@@ -34,6 +34,9 @@ class NixUpstreamTreeWebviewProvider {
         this.selectedNodes = new Set();
         this.expandedNodes = new Set();
         this.lastComment = '';
+        this.autoFocusNewItems = true; // Toggle for auto-focusing new items
+        // Load the auto-focus state from context
+        this.autoFocusNewItems = this._context.globalState.get('nixUpstreamCheck.autoFocusNewItems', true);
     }
     resolveWebviewView(webviewView, context, _token) {
         this._view = webviewView;
@@ -630,10 +633,12 @@ class NixUpstreamTreeWebviewProvider {
             if (added) {
                 // Expand the parent node
                 this.expandedNodes.add(selectedNodeId);
-                // Select the newly added node
-                this.selectedNodes.clear();
-                const newNodeKey = this.getNodeKey(tree);
-                this.selectedNodes.add(newNodeKey);
+                // Select the newly added node only if autoFocusNewItems is enabled
+                if (this.autoFocusNewItems) {
+                    this.selectedNodes.clear();
+                    const newNodeKey = this.getNodeKey(tree);
+                    this.selectedNodes.add(newNodeKey);
+                }
                 if (!skipRefresh) {
                     this.refresh();
                     this.updateSelection();
@@ -667,9 +672,11 @@ class NixUpstreamTreeWebviewProvider {
             }
         };
         expandTree(tree);
-        // Select the newly added node
-        this.selectedNodes.clear();
-        this.selectedNodes.add(newKey);
+        // Select the newly added node only if autoFocusNewItems is enabled
+        if (this.autoFocusNewItems) {
+            this.selectedNodes.clear();
+            this.selectedNodes.add(newKey);
+        }
         if (!skipRefresh) {
             this.refresh();
             this.updateSelection();
@@ -681,6 +688,15 @@ class NixUpstreamTreeWebviewProvider {
         this.checkedStates.clear();
         this.selectedNodes.clear();
         this.refresh();
+    }
+    toggleAutoFocus() {
+        this.autoFocusNewItems = !this.autoFocusNewItems;
+        // Save the state to context
+        this._context.globalState.update('nixUpstreamCheck.autoFocusNewItems', this.autoFocusNewItems);
+        return this.autoFocusNewItems;
+    }
+    getAutoFocusState() {
+        return this.autoFocusNewItems;
     }
     expandAll() {
         // Expand all nodes - backend is source of truth

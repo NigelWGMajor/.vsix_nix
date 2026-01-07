@@ -1200,6 +1200,32 @@ function activate(context) {
         vscode.window.showInformationMessage('Tree cleared. Run "Check Upstream" to start a new search.');
     });
     context.subscriptions.push(clearTreeCommand);
+    // Helper to update auto-focus context
+    const updateAutoFocusContext = () => {
+        const state = treeDataProvider.getAutoFocusState();
+        vscode.commands.executeCommand('setContext', 'nixUpstreamCheck.autoFocusEnabled', state);
+    };
+    // Set initial context
+    updateAutoFocusContext();
+    // Register commands to toggle auto-focus on insert (both do the same thing, just different icons)
+    let toggleAutoFocusCommand = vscode.commands.registerCommand('nixUpstreamCheck.toggleAutoFocus', () => {
+        const newState = treeDataProvider.toggleAutoFocus();
+        updateAutoFocusContext();
+        const statusMsg = newState
+            ? 'Auto-focus enabled: New items will be selected (nested insertion)'
+            : 'Auto-focus disabled: Selection stays on parent (sibling insertion)';
+        vscode.window.showInformationMessage(statusMsg);
+    });
+    context.subscriptions.push(toggleAutoFocusCommand);
+    let toggleAutoFocusOffCommand = vscode.commands.registerCommand('nixUpstreamCheck.toggleAutoFocusOff', () => {
+        const newState = treeDataProvider.toggleAutoFocus();
+        updateAutoFocusContext();
+        const statusMsg = newState
+            ? 'Auto-focus enabled: New items will be selected (nested insertion)'
+            : 'Auto-focus disabled: Selection stays on parent (sibling insertion)';
+        vscode.window.showInformationMessage(statusMsg);
+    });
+    context.subscriptions.push(toggleAutoFocusOffCommand);
     // Register command to add comment above a node
     let addCommentAboveCommand = vscode.commands.registerCommand('nixUpstreamCheck.addCommentAbove', async (node) => {
         const comment = await vscode.window.showInputBox({
